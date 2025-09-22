@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="UTF-8"?><sqlb_project><db path="fm_database.sqlite" readonly="0" foreign_keys="1" case_sensitive_like="0" temp_store="0" wal_autocheckpoint="1000" synchronous="2"/><attached/><window><main_tabs open="structure browser pragmas query" current="3"/></window><tab_structure><column_width id="0" width="300"/><column_width id="1" width="0"/><column_width id="2" width="100"/><column_width id="3" width="2980"/><column_width id="4" width="0"/><expanded_item id="0" parent="1"/><expanded_item id="1" parent="1"/><expanded_item id="2" parent="1"/><expanded_item id="3" parent="1"/></tab_structure><tab_browse><table title="clubs_competition" custom_title="0" dock_id="4" table="4,17:mainclubs_competition"/><dock_state state="000000ff00000000fd0000000100000002000005bb00000390fc0100000004fb000000160064006f0063006b00420072006f00770073006500310100000000000005bb0000000000000000fb000000160064006f0063006b00420072006f00770073006500320100000000000005bb0000000000000000fb000000160064006f0063006b00420072006f00770073006500350100000000000002480000000000000000fb000000160064006f0063006b00420072006f00770073006500340100000000000005bb0000012300ffffff000005bb0000000000000004000000040000000800000008fc00000000"/><default_encoding codec=""/><browse_table_settings><table schema="main" name="clubs" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="5" mode="1"/></sort><column_widths><column index="1" value="35"/><column index="2" value="191"/><column index="3" value="77"/><column index="4" value="65"/><column index="5" value="255"/><column index="6" value="39"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="clubs_competition" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="4" mode="0"/></sort><column_widths><column index="1" value="129"/><column index="2" value="50"/><column index="3" value="95"/></column_widths><filter_values><column index="2" value="=3"/></filter_values><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="competitions" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="35"/><column index="2" value="119"/><column index="3" value="63"/><column index="4" value="35"/><column index="5" value="47"/><column index="6" value="39"/><column index="7" value="99"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="fixtures" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="1" mode="0"/></sort><column_widths><column index="1" value="35"/><column index="2" value="87"/><column index="3" value="89"/><column index="4" value="87"/><column index="5" value="93"/><column index="6" value="77"/><column index="7" value="75"/><column index="8" value="46"/><column index="9" value="116"/></column_widths><filter_values><column index="4" value="=3"/></filter_values><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table></browse_table_settings></tab_browse><tab_sql><sql name="Players attributes">select p.id, first_name, last_name, date_of_birth, gv.value_date-date_of_birth as agevalue, position, nationality, value, is_retired, pa.*, cl.name
+from 
+players p 
+join players_attr pa on p.id = pa.player_id
+join clubs cl on p.club_id = cl.id
+left join global_val gv on 1 = 1
+where gv.var_name = 'GAME_DATE' and NOT is_retired 
+--and  p.id = 120
+--where p.id = 270 
+--and 
+--DATE('now')-date_of_birth = 18
+order by --DATE('now')-date_of_birth desc --at_pot_ability-at_curr_ability asc;
+---value 
+--at_pot_ability --
+at_curr_ability
+--gv.value_date-date_of_birth
+--gv.value_date-date_of_birth
+desc</sql><sql name="Players situations">select first_name, last_name, age, sit.sit_id, sit_description, opt.opt_id, opt_description, con.conseq_id, conseq_description, conseq_probab  ,
+sum(conseq_probab) over (partition by opt.opt_id )
+
+from 
+players p 
+join players_attr pa on p.id = pa.player_id
+join player_situ ps on p.id = ps.player_id
+join situations sit on ps.sit_id = sit.sit_id
+join situ_options sitop on sit.sit_id = sitop.sit_id
+join options opt on opt.opt_id = sitop.opt_id
+join options_conseq optcon on optcon.opt_id = opt.opt_id
+join consequences con on con.conseq_id = optcon.conseq_id
+--where 
+order by age desc--at_pot_ability-at_curr_ability asc;
+
+</sql><sql name="League Table 1">SELECT *
+FROM (
+    SELECT 
+        c.name AS club_name,
+        COALESCE(SUM(CASE WHEN f.played = 1 THEN 1 ELSE 0 END), 0) AS played,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND (
+                (c.id = f.home_club_id AND f.home_goals &gt; f.away_goals) OR
+                (c.id = f.away_club_id AND f.away_goals &gt; f.home_goals)
+            ) THEN 1 ELSE 0 END), 0) AS wins,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND f.home_goals = f.away_goals THEN 1 ELSE 0 END), 0) AS draws,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND (
+                (c.id = f.home_club_id AND f.home_goals &lt; f.away_goals) OR
+                (c.id = f.away_club_id AND f.away_goals &lt; f.home_goals)
+            ) THEN 1 ELSE 0 END), 0) AS losses,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND c.id = f.home_club_id THEN f.home_goals
+            WHEN f.played = 1 AND c.id = f.away_club_id THEN f.away_goals
+            ELSE 0 END), 0) AS goals_for,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND c.id = f.home_club_id THEN f.away_goals
+            WHEN f.played = 1 AND c.id = f.away_club_id THEN f.home_goals
+            ELSE 0 END), 0) AS goals_against,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND c.id = f.home_club_id THEN f.home_goals - f.away_goals
+            WHEN f.played = 1 AND c.id = f.away_club_id THEN f.away_goals - f.home_goals
+            ELSE 0 END), 0) AS goal_difference,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND (
+                (c.id = f.home_club_id AND f.home_goals &gt; f.away_goals) OR
+                (c.id = f.away_club_id AND f.away_goals &gt; f.home_goals)
+            ) THEN 3
+            WHEN f.played = 1 AND f.home_goals = f.away_goals THEN 1
+            ELSE 0 END), 0) AS points
+    FROM clubs c
+    LEFT JOIN fixtures f 
+        ON c.id = f.home_club_id OR c.id = f.away_club_id
+    WHERE c.league_id = 1
+    GROUP BY c.id
+    ORDER BY points DESC, goal_difference DESC, goals_for DESC
+);
+</sql><sql name="League Table 2">SELECT *
+FROM (
+    SELECT 
+        c.name AS club_name,
+        COALESCE(SUM(CASE WHEN f.played = 1 THEN 1 ELSE 0 END), 0) AS played,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND (
+                (c.id = f.home_club_id AND f.home_goals &gt; f.away_goals) OR
+                (c.id = f.away_club_id AND f.away_goals &gt; f.home_goals)
+            ) THEN 1 ELSE 0 END), 0) AS wins,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND f.home_goals = f.away_goals THEN 1 ELSE 0 END), 0) AS draws,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND (
+                (c.id = f.home_club_id AND f.home_goals &lt; f.away_goals) OR
+                (c.id = f.away_club_id AND f.away_goals &lt; f.home_goals)
+            ) THEN 1 ELSE 0 END), 0) AS losses,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND c.id = f.home_club_id THEN f.home_goals
+            WHEN f.played = 1 AND c.id = f.away_club_id THEN f.away_goals
+            ELSE 0 END), 0) AS goals_for,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND c.id = f.home_club_id THEN f.away_goals
+            WHEN f.played = 1 AND c.id = f.away_club_id THEN f.home_goals
+            ELSE 0 END), 0) AS goals_against,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND c.id = f.home_club_id THEN f.home_goals - f.away_goals
+            WHEN f.played = 1 AND c.id = f.away_club_id THEN f.away_goals - f.home_goals
+            ELSE 0 END), 0) AS goal_difference,
+        COALESCE(SUM(CASE 
+            WHEN f.played = 1 AND (
+                (c.id = f.home_club_id AND f.home_goals &gt; f.away_goals) OR
+                (c.id = f.away_club_id AND f.away_goals &gt; f.home_goals)
+            ) THEN 3
+            WHEN f.played = 1 AND f.home_goals = f.away_goals THEN 1
+            ELSE 0 END), 0) AS points
+    FROM clubs c
+    LEFT JOIN fixtures f 
+        ON c.id = f.home_club_id OR c.id = f.away_club_id
+    WHERE c.league_id = 2
+    GROUP BY c.id
+    ORDER BY points DESC, goal_difference DESC, goals_for DESC
+);
+</sql><sql name="Players by club">select p.id, first_name, last_name, date_of_birth, gv.value_date-date_of_birth as agevalue, position, nationality, value/1000000 value_millions, is_retired, 
+
+--at_luck/100, 
+--at_selfcont/100, 
+--at_honour/100, 
+--at_crazyness/100, 
+at_working/100, 
+--at_sexatract/100, 
+--at_friendship/100, 
+at_speed/100, 
+at_dribbling/100, 
+at_goalkeeping/100, 
+at_defending/100, 
+at_passing/100, 
+at_scoring/100, 
+--at_happiness/100, 
+--at_confidence/100, 
+--at_hope/100, 
+at_curr_ability/10, 
+at_pot_ability/10, 
+
+cl.name
+from 
+players p 
+join players_attr pa on p.id = pa.player_id
+join clubs cl on p.club_id = cl.id
+left join global_val gv on 1 = 1
+where gv.var_name = 'GAME_DATE' --and NOT is_retired 
+--and cl.name = 'Liverpool'
+--and cl.name = 'Arsenal'
+--and cl.name = 'Manchester City'
+--and cl.name = 'AFC Bournemouth'
+--and cl.name = 'Brentford'
+and cl.name = 'Watford'
+
+--and at_scoring &gt; 1500
+--and cl.id = 7
+--order by at_pot_ability desc</sql><sql name="Ability by club 1">select cl.name, cl.fame, sum(pa.at_curr_ability), sum(pa.at_defending), sum(pa.at_passing), sum(pa.at_scoring)
+from 
+players p 
+join players_attr pa on p.id = pa.player_id
+join clubs cl on p.club_id = cl.id
+left join global_val gv on 1 = 1
+where gv.var_name = 'GAME_DATE' and NOT is_retired 
+--and cl.name = 'Manchester City'
+and cl.league_id = 1
+group by cl.name, cl.fame
+--order by sum(pa.at_curr_ability) desc
+order by fame desc</sql><sql name="Ability by club 2">select cl.name, cl.fame, sum(pa.at_curr_ability), sum(pa.at_defending), sum(pa.at_passing), sum(pa.at_scoring)
+from 
+players p 
+join players_attr pa on p.id = pa.player_id
+join clubs cl on p.club_id = cl.id
+left join global_val gv on 1 = 1
+where gv.var_name = 'GAME_DATE' and NOT is_retired 
+--and cl.name = 'Manchester City'
+and cl.league_id = 2
+group by cl.name, cl.fame
+--order by sum(pa.at_curr_ability) desc
+order by fame desc</sql><sql name="Scorers table 1">select First_name||' '||last_name, c.name, count(1), gv.value_date-date_of_birth as agevalue, at_scoring/100, at_speed/100, position
+from match_scorers ms
+join players p on ms.player_id = p.id
+join fixtures f on ms.fixture_id = f.id
+join clubs c on p.club_id = c.id
+join players_attr pa on p.id = pa.player_id
+left join global_val gv on 1 = 1
+where c.league_id = 1
+group by First_name||' '||last_name, c.name
+order by count(1) desc;</sql><sql name="Scorers table 2">select First_name||' '||last_name, c.name, count(1), gv.value_date-date_of_birth as agevalue, at_scoring/100, at_speed/100, position
+from match_scorers ms
+join players p on ms.player_id = p.id
+join fixtures f on ms.fixture_id = f.id
+join clubs c on p.club_id = c.id
+join players_attr pa on p.id = pa.player_id
+left join global_val gv on 1 = 1
+where c.league_id = 2
+group by First_name||' '||last_name, c.name
+order by count(1) desc;</sql><sql name="Old players">SELECT 
+  ROUND(100.0 * old_players / total_players, 2) AS pct_old,
+  old_players, 
+  total_players
+FROM (
+  SELECT 
+    SUM(CASE WHEN CAST((julianday(gv.value_date) - julianday(p.date_of_birth)) / 365.25 AS INT) &gt; 32 
+             THEN 1 ELSE 0 END) AS old_players,
+    COUNT(1) AS total_players
+  FROM players p
+  JOIN players_attr pa ON p.id = pa.player_id
+  JOIN clubs cl ON p.club_id = cl.id
+  LEFT JOIN global_val gv ON gv.var_name = 'GAME_DATE'
+);</sql><sql name="Regens">select p.id, first_name, last_name, date_of_birth, gv.value_date-date_of_birth as agevalue, position, nationality, value/1000000, is_retired, 
+
+--at_luck/100, 
+--at_selfcont/100, 
+--at_honour/100, 
+--at_crazyness/100, 
+at_working/100, 
+--at_sexatract/100, 
+--at_friendship/100, 
+at_speed/100, 
+at_dribbling/100, 
+at_goalkeeping/100, 
+at_defending/100, 
+at_passing/100, 
+at_scoring/100, 
+--at_happiness/100, 
+--at_confidence/100, 
+--at_hope/100, 
+at_curr_ability/10, 
+at_pot_ability/10, 
+
+cl.name
+FROM players p
+JOIN players_attr pa ON p.id = pa.player_id
+JOIN clubs cl ON p.club_id = cl.id
+LEFT JOIN global_val gv ON gv.var_name = 'GAME_DATE'
+where p.id &gt; 800
+</sql><sql name="Fixtures by club">
+SELECT 
+f.date, c_home.name, f.home_goals, c_away.name, f.away_goals
+FROM fixtures f 
+LEFT JOIN clubs c_home ON c_home.id = f.home_club_id 
+LEFT JOIN clubs c_away ON c_away.id = f.away_club_id 
+WHERE --f.played = 1
+--GROUP BY c.id
+--and 
+c_home.name = 'Blackburn Rovers' or c_away.name = 'Blackburn Rovers'
+ORDER by f.date
+
+;
+
+
+</sql><sql name="Cup schedule check">SELECT 
+    f.date,
+    c_home.name AS home_club,
+	c_home.id AS home_id_club,
+    c_away.name AS away_club,
+	c_away.id AS away_id_club,
+    f.home_goals,
+    f.away_goals,
+    cc_home.is_active AS home_is_active,
+    cc_away.is_active AS away_is_active
+FROM fixtures f
+JOIN clubs c_home 
+    ON c_home.id = f.home_club_id
+JOIN clubs c_away 
+    ON c_away.id = f.away_club_id
+JOIN competitions co 
+    ON co.id = f.competition_id
+JOIN clubs_competition cc_home 
+    ON cc_home.club_id = c_home.id 
+   AND cc_home.competition_id = co.id
+JOIN clubs_competition cc_away 
+    ON cc_away.club_id = c_away.id 
+   AND cc_away.competition_id = co.id
+WHERE co.id = 3
+ORDER BY f.date, c_home.name;
+
+
+</sql><sql name="SQL 16*">UPDATE clubs_competition
+SET round = 1
+WHERE club_id IN (
+    SELECT club_id FROM (
+        SELECT c.id AS club_id
+        FROM clubs c
+        JOIN clubs_competition cl ON cl.club_id = c.id
+        WHERE cl.competition_id = 3 AND cl.is_active
+        ORDER BY fame ASC
+        LIMIT 24
+    )
+);
+
+UPDATE clubs_competition
+SET round = 2
+WHERE club_id IN (
+    SELECT club_id FROM (
+        SELECT c.id AS club_id
+        FROM clubs c
+        JOIN clubs_competition cl ON cl.club_id = c.id
+        WHERE cl.competition_id = 3 AND cl.is_active
+        AND (cl.round is NULL OR cl.round = 1)
+    )
+);
+
+INSERT INTO fixtures(home_club_id, away_club_id, date, competition_id, played, competition_round)
+SELECT home_id, away_id, match_date, 3 as competition_id, 0 as played, 1 as competition_round FROM (
+	WITH ordered AS (
+		SELECT 
+			ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn,
+			COUNT(*) OVER () AS total,
+			c.id AS club_id,
+			c.name
+		FROM clubs c
+		JOIN clubs_competition cl ON cl.club_id = c.id
+		WHERE cl.competition_id = 3 
+		  AND cl.is_active
+		  AND cl.round = 1
+	)
+	SELECT 
+		t1.club_id AS home_id, --t1.name AS home_team,
+		t2.club_id AS away_id, --t2.name AS away_team,
+	CASE
+		WHEN t1.rn &lt;= t1.total / 2
+			THEN date(gv.value_date, 'weekday 2', '+7 days')   -- Tuesday
+		ELSE
+			date(gv.value_date, 'weekday 3', '+7 days')        -- Wednesday
+	END AS match_date
+	FROM ordered t1
+	JOIN ordered t2 
+	  ON t2.rn = t1.rn + 1
+	JOIN global_val gv 
+	  ON gv.var_name = 'GAME_DATE'
+	WHERE t1.rn % 2 = 1
+	ORDER BY t1.rn
+) 
+final_query
+;
+
+
+INSERT INTO fixtures(home_club_id, away_club_id, date, competition_id, played, competition_round)
+SELECT f.away_club_id as home_club_id, f.home_club_id as away_club_id, date(f.date, '+7 days'), 3 as competition_id, 0 as played, 1 as competition_round
+FROM fixtures f WHERE competition_id = 3 and played = 0 and competition_round = 1;
+
+
+</sql><sql name="SQL 15*">UPDATE clubs_competition SET is_active = FALSE WHERE club_id IN (
+	SELECT 
+	CASE WHEN goals_team1 &gt; goals_team2 THEN team2_id ELSE team1_id END AS loser_team_id
+	FROM (
+		SELECT 
+			CASE 
+				WHEN home_club_id &lt; away_club_id THEN home_club_id 
+				ELSE away_club_id 
+			END AS team1_id,
+			CASE 
+				WHEN home_club_id &lt; away_club_id THEN away_club_id 
+				ELSE home_club_id 
+			END AS team2_id,
+			SUM(
+				CASE WHEN home_club_id &lt; away_club_id THEN home_goals ELSE away_goals END
+			) AS goals_team1,
+			SUM(
+				CASE WHEN home_club_id &lt; away_club_id THEN away_goals ELSE home_goals END
+			) AS goals_team2
+		FROM fixtures
+		WHERE competition_id = 3
+		  AND competition_round = 1
+		  AND played = 1
+		GROUP BY team1_id, team2_id
+		ORDER BY team1_id
+	)
+);
+</sql><current_tab id="12"/></tab_sql></sqlb_project>
