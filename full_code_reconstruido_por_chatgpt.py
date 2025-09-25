@@ -201,7 +201,7 @@ def init_db():
         fame INTEGER,
         FOREIGN KEY (league_id) REFERENCES competitions(id)
     );
-    
+
     CREATE TABLE clubs_competition (
         clubs_competition_id INTEGER PRIMARY KEY AUTOINCREMENT,
         club_id INTEGER,
@@ -271,6 +271,8 @@ def init_db():
         away_goals INTEGER,
         played BOOLEAN DEFAULT 0,
         competition_round INTEGER,
+        home_goals_pk INTEGER,
+        away_goals_pk INTEGER,
         FOREIGN KEY (home_club_id) REFERENCES clubs(id),
         FOREIGN KEY (away_club_id) REFERENCES clubs(id)
     );
@@ -284,12 +286,12 @@ def init_db():
     );
     """)
 
-    leagues = [("Premier League", "England", 1, 20, True, False), 
+    leagues = [("Premier League", "England", 1, 20, True, False),
                ("Championship", "England", 2, 20, True, False),
                ("FA Cup", "England", 99, 40, False, True)
                ]
     cur.executemany("INSERT INTO competitions (name, country, level, total_clubs, is_league, is_cup) VALUES (?, ?, ?, ?, ?, ?)", leagues)
-    
+
     cur.execute("INSERT INTO global_val (var_name, value_date) VALUES (?, ?)", ("GAME_DATE", GAME_DATE.isoformat()))
     conn.commit()
     conn.close()
@@ -435,51 +437,7 @@ def populate_fixtures(competition_id: int):
                     continue
                 fixtures_to_insert.append((sun.isoformat(), home, away, competition_id, None, None, 0, 1))
 
-    elif is_cup:
-        # -------------------
-        # Cup: Fame-based prelims
-        # -------------------
-        cur.execute("""
-            SELECT c.id, c.fame
-            FROM clubs_competition cc
-            JOIN clubs c ON cc.club_id = c.id
-            WHERE cc.competition_id=? AND cc.is_active=1
-        """, (competition_id,))
-        clubs = cur.fetchall()
-        n = len(clubs)
-        P = 1 << (n.bit_length() - 1)  # largest power of 2 <= n
-        prelim_ties = n - P
-        byes_count = 2 * P - n
 
-        # Sort by fame
-        clubs_sorted = sorted(clubs, key=lambda x: x[1], reverse=True)
-        byes = [cid for cid, _ in clubs_sorted[:byes_count]]
-        prelim = [cid for cid, _ in clubs_sorted[byes_count:]]
-
-        # Update competition rounds
-        cur.executemany("UPDATE clubs_competition SET round=1 WHERE competition_id=? AND club_id=?", 
-                        [(competition_id, cid) for cid in byes])
-        cur.executemany("UPDATE clubs_competition SET round=0 WHERE competition_id=? AND club_id=?", 
-                        [(competition_id, cid) for cid in prelim])
-
-        start_monday = GAME_DATE + timedelta(days=(0 - GAME_DATE.weekday()) % 7)
-        random.shuffle(prelim)
-        pairs = [(prelim[i], prelim[i+1]) for i in range(0, len(prelim), 2)]
-
-        for i, (home, away) in enumerate(pairs):
-            # First leg
-            tue1 = start_monday + timedelta(days=1)
-            wed1 = start_monday + timedelta(days=2)
-            leg1 = tue1 if i % 2 == 0 else wed1
-            fixtures_to_insert.append((leg1.isoformat(), home, away, competition_id, None, None, 0, 0))
-
-            # Second leg (two weeks later)
-            tue2 = start_monday + timedelta(days=15)
-            wed2 = start_monday + timedelta(days=16)
-            leg2 = tue2 if i % 2 == 0 else wed2
-            fixtures_to_insert.append((leg2.isoformat(), away, home, competition_id, None, None, 0, 0))
-
-        print(f"🏆 Cup {competition_id}: {n} clubs → {len(pairs)} prelim ties, {byes_count} byes.")
 
     # Save fixtures
     if fixtures_to_insert:
@@ -493,39 +451,6 @@ def populate_fixtures(competition_id: int):
     conn.close()
     print(f"✅ Fixtures populated for competition {competition_id}")
 
-
-def populate_cup_round(competition_id: int, club_ids: list, start_date: date, current_round: int = 1):
-    """
-    Generate one knockout round for a cup (two-legged ties).
-    - First leg: Tue/Wed of start_date week
-    - Second leg: Tue/Wed two weeks later
-    """
-    random.shuffle(club_ids)
-
-    if len(club_ids) % 2 == 1:
-        bye = club_ids.pop()
-        print(f"⚠️ Club {bye} advances by bye in competition {competition_id}")
-        return [], [bye]
-
-    fixtures = []
-    winners_auto = []
-
-    for i in range(0, len(club_ids), 2):
-        home, away = club_ids[i], club_ids[i+1]
-
-        # First leg
-        tue1 = start_date + timedelta(days=1)   # Tuesday
-        wed1 = start_date + timedelta(days=2)   # Wednesday
-        leg1_date = tue1 if (i//2) % 2 == 0 else wed1
-        fixtures.append((leg1_date.isoformat(), home, away, competition_id, None, None, 0, current_round))
-
-        # Second leg (two weeks later)
-        tue2 = start_date + timedelta(days=15)  # Tuesday + 2 weeks
-        wed2 = start_date + timedelta(days=16)  # Wednesday + 2 weeks
-        leg2_date = tue2 if (i//2) % 2 == 0 else wed2
-        fixtures.append((leg2_date.isoformat(), away, home, competition_id, None, None, 0, current_round))
-
-    return fixtures, winners_auto
 
 
 
@@ -737,58 +662,6 @@ def generate_player(position=None, club_id=None, club_fame=None, force_youth=Fal
     return player, player_attr
 
 
-# -----------------------------
-# Players table operations
-# -----------------------------
-def populate_400_players():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT id, fame FROM clubs WHERE league_id = 1")
-    clubs = cur.fetchall()
-    if len(clubs) != 20:
-        print(f"⚠️ Expected 20 Premier League clubs, found {len(clubs)}")
-        conn.close()
-        return
-
-    position_counts = {"GK": 2,"CB": 3,"RB": 2,"LB": 2,"CDM": 1,"CM": 2,"CAM": 1,"RM": 1,"LM": 1,"RW": 1,"LW": 1,"ST": 3}
-    players, players_attr = [], []
-
-    for club_id, club_fame in clubs:
-        for position, count in position_counts.items():
-            for _ in range(count):
-                player, attr = generate_player(position=position, club_id=club_id, club_fame=club_fame)
-                # convert date to iso string for sqlite stability
-                p = list(player)
-                if isinstance(p[2], dt.date):
-                    p[2] = p[2].isoformat()
-                players.append(tuple(p))
-                players_attr.append(attr)
-
-    cur.executemany("""
-        INSERT INTO players (
-            first_name, last_name, date_of_birth, nationality,
-            position, club_id, value, wage, contract_until
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, players)
-
-    last_rowid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
-    start_id = last_rowid - len(players) + 1
-    player_ids = list(range(start_id, start_id + len(players)))
-
-    players_attr_with_ids = [(pid, *attr) for pid, attr in zip(player_ids, players_attr)]
-    cur.executemany("""
-        INSERT INTO players_attr (
-            player_id,
-            at_luck, at_selfcont, at_honour, at_crazyness, at_working, at_sexatract, at_friendship,
-            at_speed, at_dribbling, at_goalkeeping, at_defending, at_passing, at_scoring,
-            at_happiness, at_confidence, at_hope,
-            at_curr_ability, at_pot_ability
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, players_attr_with_ids)
-
-    conn.commit()
-    conn.close()
-    print("✅ 400 players generated and inserted.")
 
 def depopulate_players():
     conn = sqlite3.connect(DB_PATH)
@@ -1055,7 +928,7 @@ def simulate_fixtures_for_day(conn, day):
 
     cur = conn.cursor()
     cur.execute("""
-            SELECT f.id, f.home_club_id, hc.name, f.away_club_id, ac.name, f.competition_id, comp.name
+            SELECT f.id, f.home_club_id, hc.name, f.away_club_id, ac.name, f.competition_id, comp.name, comp.is_cup, f.competition_round
             FROM fixtures f
             JOIN clubs hc ON hc.id = f.home_club_id
             JOIN clubs ac ON ac.id = f.away_club_id
@@ -1080,34 +953,34 @@ def simulate_fixtures_for_day(conn, day):
         """
         # Base slightly reduced
         base = 0.28 if home_side else 0.22
-    
+
         # Normalize
         atk_n = attack / max(1.0, LEAGUE_ATK_MEAN)
         def_n = opp_defense / max(1.0, LEAGUE_DEF_MEAN)
-    
+
         # Attack vs defense ratio (balanced curve)
         ratio = (atk_n ** 1.2) / (def_n ** 0.8)
-    
+
         # Fame multiplier (moderate)
         fame_mult = fame ** 1.25
-    
+
         # Raw λ
         lam = base * ratio * fame_mult * (0.92 + 0.18 * form_mult)
-    
+
         # Defense suppression
         defense_factor = 1.0 / (1.0 + (def_n - 1.0) * 0.85)
         lam *= defense_factor
-    
+
         # Weak defenses leak a bit more
         if def_n < 0.9:
             lam *= 1.1
-    
+
         # Random variance
         lam *= random.uniform(0.95, 1.05)
-    
+
         # Global tuning knob (adjust manually if needed)
         lam *= GOAL_SCALING * 0.9  # reduce totals ~10%
-    
+
         # Cap
         max_cap = 3.0 if home_side else 2.6
         return max(0.05, min(lam, max_cap))
@@ -1119,7 +992,7 @@ def simulate_fixtures_for_day(conn, day):
         probs[-1] = max(0.0, 1.0 - sum(probs[:-1]))
         return random.choices(range(kmax), weights=probs, k=1)[0]
 
-    for fixture_id, home_id, home_name, away_id, away_name, league_id, league_name in fixtures:
+    for fixture_id, home_id, home_name, away_id, away_name, league_id, league_name, is_cup, competition_round in fixtures:
         home_attack, home_defense = team_strengths(cur, home_id)
         away_attack, away_defense = team_strengths(cur, away_id)
 
@@ -1140,12 +1013,106 @@ def simulate_fixtures_for_day(conn, day):
         scorers.extend(hs + as_)
         names.extend(hn + an)
 
-        cur.execute("UPDATE fixtures SET home_goals=?, away_goals=?, played=1 WHERE id=?",
-                    (home_goals, away_goals, fixture_id))
-        if scorers:
-            cur.executemany("INSERT INTO match_scorers (player_id, fixture_id) VALUES (?, ?)", scorers)
 
-        print(f"⚽ [{league_name}] {home_name} {home_goals} - {away_goals} {away_name}")
+        if is_cup:
+
+            cur.execute("UPDATE fixtures SET home_goals=?, away_goals=?, played=1 WHERE id=?",
+                    (home_goals, away_goals, fixture_id))
+            if scorers:
+                cur.executemany("INSERT INTO match_scorers (player_id, fixture_id) VALUES (?, ?)", scorers)
+
+            # When its a CUP, we check both legs if they were played to decide penalty kicking in the case of draw, also for finals
+
+            cur.execute("""
+                SELECT team1_id, team2_id, goals_team1, goals_team2,
+                       (ABS(RANDOM()) % 5) + 1 AS rand1,
+                       (ABS(RANDOM()) % 5) + 1 AS rand2,
+                       matches_played, total_matches
+                FROM (
+                    SELECT
+                        CASE WHEN home_club_id < away_club_id THEN home_club_id ELSE away_club_id END AS team1_id,
+                        CASE WHEN home_club_id < away_club_id THEN away_club_id ELSE home_club_id END AS team2_id,
+                        SUM(CASE WHEN home_club_id < away_club_id THEN home_goals ELSE away_goals END) AS goals_team1,
+                        SUM(CASE WHEN home_club_id < away_club_id THEN away_goals ELSE home_goals END) AS goals_team2,
+                        SUM(CASE WHEN played = 1 THEN 1 ELSE 0 END) AS matches_played,
+                        COUNT(1) AS total_matches
+                    FROM fixtures
+                    WHERE competition_id = ?
+                      AND competition_round = ?
+                      AND (home_club_id = ? OR away_club_id = ?)
+                    GROUP BY team1_id, team2_id
+                    ORDER BY team1_id
+                )
+            """, (league_id, competition_round,home_id,home_id,))
+            cup_both_legs = cur.fetchall()
+            for team1_id, team2_id, goals_team1, goals_team2, rand1, rand2, matches_played, total_matches in cup_both_legs:
+                #print(team1_id, team2_id, goals_team1, goals_team2, rand1, rand2, matches_played, total_matches)
+
+                if matches_played == 1 and total_matches == 2:
+                    print(f"⚽ [{league_name}] - Round {competition_round} - First Leg: {home_name} {home_goals} - {away_goals} {away_name}") 
+                elif matches_played == 2 and total_matches == 2: 
+                    
+                    if goals_team1 > goals_team2:
+                        print(f"⚽ [{league_name}] - Round {competition_round} - Second Leg: {home_name} {home_goals}({goals_team1}) - {away_goals}({goals_team2}) {away_name}")
+                        print(f"⚽ {home_name} advances to the next stage")
+                    elif goals_team1 == goals_team2:
+                        
+                        
+                        if rand1 > rand2:
+                            print(f"⚽ [{league_name}] - Round {competition_round} - Second Leg: {home_name} {home_goals}({goals_team1}) - {away_goals}({goals_team2}) {away_name}")
+                            print(f"⚽ {home_name} advances to the next stage by penalties ({rand1} - {rand1-1})")
+                            cur.execute("UPDATE fixtures SET home_goals_pk=?, away_goals_pk=? WHERE id=?",
+                                    (rand1, rand1-1, fixture_id))
+                        else:
+                            print(f"⚽ [{league_name}] - Round {competition_round} - Second Leg: {home_name} {home_goals}({goals_team1}) - {away_goals}({goals_team2}) {away_name}")
+                            print(f"⚽ {away_name} advances to the next stage by penalties ({rand2} - {rand2-1})")
+                            cur.execute("UPDATE fixtures SET home_goals_pk=?, away_goals_pk=? WHERE id=?",
+                                    (rand2-1, rand2, fixture_id))
+                    else:
+                        print(f"⚽ [{league_name}] - Round {competition_round} - Second Leg: {home_name} {home_goals}({goals_team1}) - {away_goals}({goals_team2}) {away_name}")
+                        print(f"⚽ {away_name} advances to the next stage")
+                    
+                else:
+                    print(f"⚽ [{league_name}] - FINAL: {home_name} {home_goals} - {away_goals} {away_name}")
+                    if home_goals > away_goals:
+                        print(f"⚽ {home_name} is the champion of the {league_name}!! Congratulations!!")
+                    elif home_goals == away_goals:
+                        
+                        
+                        print(f"⚽ {home_name} is the champion of the {league_name}!! Congratulations!!")
+                        
+                        if rand1 > rand2:
+                            print(f"⚽ [{league_name}] - FINAL: {home_goals}({rand1}) - {away_goals}({rand1-1}) {away_name}")
+                            print(f"⚽ {home_name} is the champion of the {league_name} by penalties ({rand1} - {rand1-1})!! Congratulations!!")
+                            cur.execute("UPDATE fixtures SET home_goals_pk=?, away_goals_pk=? WHERE id=?",
+                                    (rand1, rand1-1, fixture_id))
+                        else:
+                            print(f"⚽ [{league_name}] - FINAL: {home_goals}({rand2-1}) - {away_goals}({rand2}) {away_name}")
+                            print(f"⚽ {away_name} is the champion of the {league_name} by penalties ({rand2} - {rand2-1})!! Congratulations!!")
+                            cur.execute("UPDATE fixtures SET home_goals_pk=?, away_goals_pk=? WHERE id=?",
+                                    (rand2-1, rand2, fixture_id))
+                        
+                        
+                    else:
+                        print(f"⚽ {away_name} is the champion of the {league_name}!! Congratulations!!")
+
+
+        else:
+            #print("Es Liga")
+            cur.execute("UPDATE fixtures SET home_goals=?, away_goals=?, played=1 WHERE id=?",
+                        (home_goals, away_goals, fixture_id))
+            if scorers:
+                cur.executemany("INSERT INTO match_scorers (player_id, fixture_id) VALUES (?, ?)", scorers)
+
+            print(f"⚽ [{league_name}] {home_name} {home_goals} - {away_goals} {away_name}")
+
+
+
+
+
+
+
+
 
         if names:
             print("   Scorers:", ", ".join(names))
@@ -1484,7 +1451,7 @@ def game_loop():
         #     """)
         #     row = cur.fetchone()
         #     current_round = row[0] if row and row[0] is not None else 0
-        
+
         #     winners = resolve_cup_round(conn, 3, current_round)
         #     if winners:
         #         advance_cup_round(conn, 3, GAME_DATE + timedelta(days=14), current_round, winners)
@@ -1504,7 +1471,7 @@ def game_loop():
     conn.close()
 
 
-def populate_800_players():
+def populate_all_players():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -1618,336 +1585,7 @@ def populate_competition_clubs():
     conn.close()
     print("✅ Clubs linked to competitions")
 
-def resolve_cup_round(conn, competition_id: int, current_round: int):
-    cur = conn.cursor()
 
-    # Fetch all matches of this round
-    cur.execute("""
-        SELECT home_club_id, away_club_id, home_goals, away_goals
-        FROM fixtures
-        WHERE competition_id = ? AND competition_round = ? AND played = 1
-        ORDER BY date
-    """, (competition_id, current_round))
-    matches = cur.fetchall()
-
-    # Check if all games for this round are finished
-    cur.execute("""
-        SELECT COUNT(*) FROM fixtures
-        WHERE competition_id = ? AND competition_round = ?
-    """, (competition_id, current_round))
-    total_matches = cur.fetchone()[0]
-
-    if len(matches) < total_matches:
-        return []  # round still ongoing
-
-    # --- Aggregate results ---
-    ties = {}
-    for home, away, hg, ag in matches:
-        key = tuple(sorted((home, away)))
-        ties.setdefault(key, []).append((home, away, hg, ag))
-
-    winners = []
-    for key, legs in ties.items():
-        agg = {key[0]: 0, key[1]: 0}
-        for home, away, hg, ag in legs:
-            agg[home] += hg or 0
-            agg[away] += ag or 0
-
-        if agg[key[0]] > agg[key[1]]:
-            winner, loser = key[0], key[1]
-        elif agg[key[1]] > agg[key[0]]:
-            winner, loser = key[1], key[0]
-        else:  # tie → penalties
-            winner = random.choice(key)
-            loser = key[1] if winner == key[0] else key[0]
-
-        winners.append(winner)
-        cur.execute("UPDATE clubs_competition SET is_active=0 WHERE club_id=? AND competition_id=?",
-                    (loser, competition_id))
-
-    conn.commit()
-
-    # --- Special case: Preliminary Round 0 ---
-    if current_round == 0:
-        # Collect PL clubs (waiting byes)
-        cur.execute("""
-            SELECT c.id FROM clubs c
-            JOIN clubs_competition cc ON cc.club_id = c.id
-            WHERE cc.competition_id=? AND cc.is_active=1 AND cc.round=1
-        """, (competition_id,))
-        pl = [r[0] for r in cur.fetchall()]
-
-        # Get top 12 Championship by fame
-        cur.execute("""
-            SELECT c.id FROM clubs c
-            JOIN clubs_competition cc ON cc.club_id = c.id
-            WHERE cc.competition_id=? AND cc.is_active=1 AND cc.round=0
-            ORDER BY c.fame DESC
-            LIMIT 12
-        """, (competition_id,))
-        ch_byes = [r[0] for r in cur.fetchall()]
-
-        # Move Round 0 winners + CH byes → Round 1
-        for cid in winners + ch_byes:
-            cur.execute("UPDATE clubs_competition SET round=1 WHERE club_id=? AND competition_id=?",
-                        (cid, competition_id))
-
-        all_round1 = winners + ch_byes + pl
-        assert len(all_round1) == 32, f"Expected 32 teams in Round 1, got {len(all_round1)}"
-
-        # Get last match date of Round 0 to schedule Round 1
-        cur.execute("SELECT MAX(date) FROM fixtures WHERE competition_id=? AND competition_round=0",
-                    (competition_id,))
-        last_date = date.fromisoformat(cur.fetchone()[0])
-
-        # Generate Round 1 fixtures
-        next_round = 1
-        cup_fixtures, _ = populate_cup_round(competition_id, all_round1, last_date + timedelta(days=7), next_round)
-        cur.executemany("""
-            INSERT INTO fixtures (date, home_club_id, away_club_id,
-                                  competition_id, home_goals, away_goals, played, competition_round)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, cup_fixtures)
-
-        conn.commit()
-        print(f"✅ Round 1 created with {len(all_round1)} teams (20 PL + 12 CH)")
-        return winners
-
-    # --- Normal rounds (1, 2, …) ---
-    next_round = current_round + 1
-    if len(winners) < 2:
-        if winners:
-            cur.execute("SELECT name FROM clubs WHERE id=?", (winners[0],))
-            champ = cur.fetchone()[0]
-            print(f"🏆 {champ} wins Cup {competition_id}!")
-        return winners
-
-    # Schedule next knockout round
-    cur.execute("SELECT MAX(date) FROM fixtures WHERE competition_id=? AND competition_round=?",
-                (competition_id, current_round))
-    last_date = date.fromisoformat(cur.fetchone()[0])
-
-    cup_fixtures, _ = populate_cup_round(competition_id, winners, last_date + timedelta(days=7), next_round)
-    cur.executemany("""
-        INSERT INTO fixtures (date, home_club_id, away_club_id,
-                              competition_id, home_goals, away_goals, played, competition_round)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, cup_fixtures)
-
-    conn.commit()
-    print(f"✅ Round {next_round} created with {len(winners)} teams")
-    return winners
-
-
-def advance_cup_round(conn, competition_id: int, start_date: date, current_round: int, winners: list):
-    cur = conn.cursor()
-
-    # If fewer than 2 teams, tournament is over
-    if len(winners) < 2:
-        if winners:
-            cur.execute("SELECT name FROM clubs WHERE id=?", (winners[0],))
-            champ = cur.fetchone()[0]
-            print(f"🏆 {champ} wins Cup {competition_id}!")
-        return
-
-    # Move to next round
-    next_round = 1 if current_round == 0 else current_round + 1
-
-    # Mark winners in clubs_competition as next_round
-    for cid in winners:
-        cur.execute("""
-            UPDATE clubs_competition
-            SET round=?
-            WHERE club_id=? AND competition_id=?
-        """, (next_round, cid, competition_id))
-
-    # Shuffle and generate fixtures
-    random.shuffle(winners)
-    cup_fixtures, _ = populate_cup_round(competition_id, winners, start_date, next_round)
-
-    cur.executemany("""
-        INSERT INTO fixtures (date, home_club_id, away_club_id,
-                              competition_id, home_goals, away_goals, played, competition_round)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, cup_fixtures)
-
-    conn.commit()
-
-    stage = {32: "Round of 32", 16: "Round of 16", 8: "Quarterfinals",
-             4: "Semifinals", 2: "Final"}.get(len(winners), f"Round {next_round}")
-
-    print(f"✅ {stage} created for cup {competition_id} with {len(winners)//2} ties")
-
-def seed_cup_round0_two_tier(conn, competition_id: int, season_start_date: date):
-    """
-    Seed FA Cup:
-    - PL clubs (league_id=1) skip to Round 1
-    - Championship clubs (league_id=2) play Round 0 prelims (24 → 12 winners)
-    """
-    cur = conn.cursor()
-
-    # Get clubs entered
-    cur.execute("""
-        SELECT c.id, c.league_id
-        FROM clubs_competition cc
-        JOIN clubs c ON c.id = cc.club_id
-        WHERE cc.competition_id=? AND cc.is_active=1
-    """, (competition_id,))
-    rows = cur.fetchall()
-
-    pl = [cid for cid, lid in rows if lid == 1]
-    ch = [cid for cid, lid in rows if lid == 2]
-
-    # Sanity check
-    assert len(pl) == 20, f"Expected 20 PL clubs, got {len(pl)}"
-    assert len(ch) == 24, f"Expected 24 CH clubs, got {len(ch)}"
-
-    # Mark PL → Round 1
-    if pl:
-        cur.executemany("""
-            UPDATE clubs_competition SET round=1
-            WHERE competition_id=? AND club_id=?
-        """, [(competition_id, cid) for cid in pl])
-
-    # Mark CH → Round 0
-    if ch:
-        cur.executemany("""
-            UPDATE clubs_competition SET round=0
-            WHERE competition_id=? AND club_id=?
-        """, [(competition_id, cid) for cid in ch])
-
-    # Build Round 0 fixtures (24 clubs → 12 ties, two legs)
-    random.shuffle(ch)
-    assert len(ch) % 2 == 0, "Championship clubs count must be even to form pairs"
-    pairs = [(ch[i], ch[i+1]) for i in range(0, len(ch), 2)]
-    assert len(pairs) == 12, f"Expected 12 prelim ties, got {len(pairs)}"
-
-    fixtures = []
-    start_monday = season_start_date + timedelta(days=(0 - season_start_date.weekday()) % 7)
-
-    for i, (home, away) in enumerate(pairs):
-        tue1 = start_monday + timedelta(days=1)
-        wed1 = start_monday + timedelta(days=2)
-        leg1 = tue1 if i % 2 == 0 else wed1
-
-        tue2 = start_monday + timedelta(days=15)
-        wed2 = start_monday + timedelta(days=16)
-        leg2 = tue2 if i % 2 == 0 else wed2
-
-        fixtures.append((leg1.isoformat(), home, away, competition_id, None, None, 0, 0))
-        fixtures.append((leg2.isoformat(), away, home, competition_id, None, None, 0, 0))
-
-    cur.executemany("""
-        INSERT INTO fixtures (date, home_club_id, away_club_id,
-                              competition_id, home_goals, away_goals, played, competition_round)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, fixtures)
-
-    conn.commit()
-    print(
-        f"🏆 Cup {competition_id} seeded:\n"
-        f"   {len(pl)} PL clubs waiting in Round 1\n"
-        f"   {len(ch)} CH clubs in Round 0 → {len(pairs)} ties created (two legs each = {len(fixtures)} fixtures)"
-    )
-
-def resolve_cup_round(conn, competition_id: int, current_round: int):
-    cur = conn.cursor()
-
-    # Fetch played matches
-    cur.execute("""
-        SELECT home_club_id, away_club_id, home_goals, away_goals
-        FROM fixtures
-        WHERE competition_id=? AND competition_round=? AND played=1
-        ORDER BY date
-    """, (competition_id, current_round))
-    matches = cur.fetchall()
-
-    # Check if all fixtures are done
-    cur.execute("SELECT COUNT(*) FROM fixtures WHERE competition_id=? AND competition_round=?",
-                (competition_id, current_round))
-    total_matches = cur.fetchone()[0]
-    if len(matches) < total_matches:
-        return []  # round still in progress
-
-    # Aggregate winners
-    ties, winners = {}, []
-    for home, away, hg, ag in matches:
-        key = tuple(sorted((home, away)))
-        ties.setdefault(key, []).append((home, away, hg, ag))
-
-    for key, legs in ties.items():
-        agg = {key[0]: 0, key[1]: 0}
-        for home, away, hg, ag in legs:
-            agg[home] += hg or 0
-            agg[away] += ag or 0
-
-        if agg[key[0]] > agg[key[1]]:
-            winner, loser = key[0], key[1]
-        elif agg[key[1]] > agg[key[0]]:
-            winner, loser = key[1], key[0]
-        else:  # penalties
-            winner = random.choice(key)
-            loser = key[1] if winner == key[0] else key[0]
-
-        winners.append(winner)
-        cur.execute("UPDATE clubs_competition SET is_active=0 WHERE club_id=? AND competition_id=?",
-                    (loser, competition_id))
-
-    winners = list(set(winners))  # deduplicate
-
-    # Special: Round 0 → Round 1
-    if current_round == 0:
-        assert len(winners) == 12, f"Expected 12 CH winners, got {len(winners)}"
-
-        cur.execute("""
-            SELECT c.id FROM clubs c
-            JOIN clubs_competition cc ON c.id=cc.club_id
-            WHERE cc.competition_id=? AND cc.is_active=1
-              AND c.league_id=1
-        """, (competition_id,))
-        pl = [r[0] for r in cur.fetchall()]
-        assert len(pl) == 20, f"Expected 20 PL clubs, got {len(pl)}"
-
-        # Promote winners
-        for cid in winners:
-            cur.execute("UPDATE clubs_competition SET round=1 WHERE club_id=? AND competition_id=?",
-                        (cid, competition_id))
-
-        all_round1 = pl + winners
-        assert len(all_round1) == 32, f"Expected 32 in Round 1, got {len(all_round1)}"
-
-        # Schedule Round 1 fixtures
-        cur.execute("SELECT MAX(date) FROM fixtures WHERE competition_id=? AND competition_round=0",
-                    (competition_id,))
-        last_date = date.fromisoformat(cur.fetchone()[0])
-
-        next_round = 1
-        cup_fixtures, _ = populate_cup_round(competition_id, all_round1, last_date + timedelta(days=7), next_round)
-        cur.executemany("""
-            INSERT INTO fixtures (date, home_club_id, away_club_id,
-                                  competition_id, home_goals, away_goals, played, competition_round)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, cup_fixtures)
-
-        conn.commit()
-        print(f"✅ Round 1 created with {len(all_round1)} teams (20 PL + 12 CH winners)")
-        return winners
-
-    # Normal rounds...
-    # (unchanged from your current version)
-
-
-def get_current_cup_round(conn, competition_id: int) -> int:
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT MIN(competition_round)
-        FROM fixtures
-        WHERE competition_id = ? AND played = 0
-    """, (competition_id,))
-    row = cur.fetchone()
-    if row and row[0] is not None:
-        return row[0]  # Hay fixtures pendientes → ronda actual
-    return None  # Ninguna ronda pendiente
 
 
 
@@ -1955,8 +1593,8 @@ def cup_manage(competition_id: int):
 
     conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
     cur = conn.cursor()
-    
-    
+
+
     # Check if there are matches to be played in the cup
     cur.execute("""
         SELECT count(1)
@@ -1965,14 +1603,12 @@ def cup_manage(competition_id: int):
     """, (competition_id,))
     row = cur.fetchone()
     pending_matches = row[0] if row else 0
-    print(f"Matches to be played: {pending_matches}")
-    
-    
-    if pending_matches > 0:
-        print(f"Pending matches to be played. Waiting to finish them.")
-    else:
-                
-        
+    #print(f"Matches to be played: {pending_matches}")
+
+
+    if pending_matches == 0:
+
+
         # Find total clubs and decide preliminary rounds
         cur.execute("""
             SELECT count(1)
@@ -1981,8 +1617,8 @@ def cup_manage(competition_id: int):
         """, (competition_id,))
         row = cur.fetchone()
         total_clubs = row[0] if row else 0
-        print(f"Total clubs: {total_clubs}")
-        
+        #print(f"Total clubs: {total_clubs}")
+
         cur.execute("""
             SELECT IFNULL(MAX(competition_round), 0)+1
             FROM fixtures
@@ -1990,46 +1626,64 @@ def cup_manage(competition_id: int):
         """, (competition_id,))
         row = cur.fetchone()
         next_cup_round = row[0] if row else 0
-        print(f"Next cup round to be played: {next_cup_round}")
-        
+        #print(f"Next cup round to be played: {next_cup_round}")
+
         # We decide the winners from the previous round
-        
+
         if next_cup_round > 1:
-            print("Decide winners and create next round")
-            
+            #print("Decide winners and create next round")
+
             # Decide winners
             cur.execute("""
                 UPDATE clubs_competition SET is_active = FALSE WHERE club_id IN (
-                	SELECT 
-                	CASE WHEN goals_team1 > goals_team2 THEN team2_id ELSE team1_id END AS loser_team_id
-                	FROM (
-                		SELECT 
-                			CASE 
-                				WHEN home_club_id < away_club_id THEN home_club_id 
-                				ELSE away_club_id 
-                			END AS team1_id,
-                			CASE 
-                				WHEN home_club_id < away_club_id THEN away_club_id 
-                				ELSE home_club_id 
-                			END AS team2_id,
-                			SUM(
-                				CASE WHEN home_club_id < away_club_id THEN home_goals ELSE away_goals END
-                			) AS goals_team1,
-                			SUM(
-                				CASE WHEN home_club_id < away_club_id THEN away_goals ELSE home_goals END
-                			) AS goals_team2
-                		FROM fixtures
-                		WHERE competition_id = ?
-                		  AND competition_round = ?-1
-                		  AND played = 1
-                		GROUP BY team1_id, team2_id
-                		ORDER BY team1_id
-                	)
+                       SELECT
+                       CASE 
+								WHEN goals_team1 > goals_team2 
+								THEN team2_id 
+								WHEN goals_team1 = goals_team2 
+								THEN 
+									CASE 
+										WHEN goals_team1_pk > goals_team2_pk
+										THEN team2_id
+										ELSE team1_id
+									END
+								ELSE team1_id
+                                END AS loser_team_id
+                       FROM (
+                            SELECT
+                            CASE
+                                            WHEN home_club_id < away_club_id THEN home_club_id
+                                            ELSE away_club_id
+                            END AS team1_id,
+                            CASE
+                                            WHEN home_club_id < away_club_id THEN away_club_id
+                                            ELSE home_club_id
+                            END AS team2_id,
+                            SUM(
+                                            CASE WHEN home_club_id < away_club_id THEN home_goals ELSE away_goals END
+                            ) AS goals_team1,
+                            SUM(
+                                            CASE WHEN home_club_id < away_club_id THEN away_goals ELSE home_goals END
+                            ) AS goals_team2,
+															   
+                            SUM(
+                                            CASE WHEN home_club_id < away_club_id THEN home_goals_pk ELSE away_goals_pk END
+                            ) AS goals_team1_pk,
+                            SUM(
+                                            CASE WHEN home_club_id < away_club_id THEN away_goals_pk ELSE home_goals_pk END
+                            ) AS goals_team2_pk
+                        FROM fixtures
+                        WHERE competition_id = ?
+                          AND competition_round = ?-1
+                          AND played = 1
+                        GROUP BY team1_id, team2_id
+                        ORDER BY team1_id
+                       )
                 )
             """, (competition_id, next_cup_round, ))
 
             conn.commit()
-            
+
             # Seed all teams for the next round, waiting ones and last round winners
             cur.execute("""
                 UPDATE clubs_competition
@@ -2046,46 +1700,46 @@ def cup_manage(competition_id: int):
             """, (next_cup_round, competition_id,next_cup_round,))
 
             conn.commit()
-            
+
             # Create next round fixtures
             cur.execute("""
                 INSERT INTO fixtures(home_club_id, away_club_id, date, competition_id, played, competition_round)
                 SELECT home_id, away_id, match_date, ? as competition_id, 0 as played, ? as competition_round FROM (
-                	WITH ordered AS (
-                		SELECT 
-                			ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn,
-                			COUNT(*) OVER () AS total,
-                			c.id AS club_id,
-                			c.name
-                		FROM clubs c
-                		JOIN clubs_competition cl ON cl.club_id = c.id
-                		WHERE cl.competition_id = ?
-                		  AND cl.is_active
-                		  AND cl.round = ?
-                	)
-                	SELECT 
-                		t1.club_id AS home_id, --t1.name AS home_team,
-                		t2.club_id AS away_id, --t2.name AS away_team,
-                	CASE
-                		WHEN t1.rn <= t1.total / 2
-                			THEN date(gv.value_date, 'weekday 2', '+7 days')   -- Tuesday
-                		ELSE
-                			date(gv.value_date, 'weekday 3', '+7 days')        -- Wednesday
-                	END AS match_date
-                	FROM ordered t1
-                	JOIN ordered t2 
-                	  ON t2.rn = t1.rn + 1
-                	JOIN global_val gv 
-                	  ON gv.var_name = 'GAME_DATE'
-                	WHERE t1.rn % 2 = 1
-                	ORDER BY t1.rn
-                ) 
+                               WITH ordered AS (
+                                               SELECT
+                                                               ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn,
+                                                               COUNT(*) OVER () AS total,
+                                                               c.id AS club_id,
+                                                               c.name
+                                               FROM clubs c
+                                               JOIN clubs_competition cl ON cl.club_id = c.id
+                                               WHERE cl.competition_id = ?
+                                                 AND cl.is_active
+                                                 AND cl.round = ?
+                               )
+                               SELECT
+                                               t1.club_id AS home_id, --t1.name AS home_team,
+                                               t2.club_id AS away_id, --t2.name AS away_team,
+                               CASE
+                                               WHEN t1.rn <= t1.total / 2
+                                                               THEN date(gv.value_date, 'weekday 2', '+14 days')   -- Tuesday
+                                               ELSE
+                                                               date(gv.value_date, 'weekday 3', '+14 days')        -- Wednesday
+                               END AS match_date
+                               FROM ordered t1
+                               JOIN ordered t2
+                                 ON t2.rn = t1.rn + 1
+                               JOIN global_val gv
+                                 ON gv.var_name = 'GAME_DATE'
+                               WHERE t1.rn % 2 = 1
+                               ORDER BY t1.rn
+                )
                 final_query
             """, (competition_id, next_cup_round, competition_id,next_cup_round,))
 
             conn.commit()
-            print(f"First leg for round {next_cup_round} created")
-            
+            #print(f"First leg for round {next_cup_round} created")
+
             #Calculate again team number after deciding winners
             cur.execute("""
                 SELECT count(1)
@@ -2094,8 +1748,8 @@ def cup_manage(competition_id: int):
             """, (competition_id,))
             row = cur.fetchone()
             total_clubs = row[0] if row else 0
-            print(f"Total clubs: {total_clubs}")
-            
+            #print(f"Total clubs: {total_clubs}")
+
             if total_clubs >= 4:
                 cur.execute("""
                     INSERT INTO fixtures(home_club_id, away_club_id, date, competition_id, played, competition_round)
@@ -2104,35 +1758,35 @@ def cup_manage(competition_id: int):
                 """, (competition_id, next_cup_round, competition_id,next_cup_round,))
 
                 conn.commit()
-                print(f"Second leg for round {next_cup_round} created")
-            
-            
+                #print(f"Second leg for round {next_cup_round} created")
+
+
         else:
-            
-                
+
+
             if total_clubs == 1:
                 print("Cup already finished")
             elif total_clubs in {2, 4, 8, 16, 32, 64, 128} and total_clubs > 1:
                 print("Correct number. Scheduling fixtures")
-    
-            else: 
-                print("NOT correct number. Preliminary round needed")
-    
+
+            else:
+                #print("NOT correct number. Preliminary round needed")
+
                 if total_clubs > 128:
-                    print("Adjusting to get 128 teams")
+                    #print("Adjusting to get 128 teams")
                     round_target=128
-                    preliminary_teams=2*(total_clubs-round_target)                
+                    preliminary_teams=2*(total_clubs-round_target)
                 elif total_clubs > 64:
-                    print("Adjusting to get 64 teams")
+                    #print("Adjusting to get 64 teams")
                     round_target=64
                     preliminary_teams=2*(total_clubs-round_target)
                     print(f"Preliminary_teams: {preliminary_teams}")
                 elif total_clubs > 32:
-                    print("Adjusting to get 32 teams")
+                    #print("Adjusting to get 32 teams")
                     round_target=32
                     preliminary_teams=2*(total_clubs-round_target)
-                    print(f"Preliminary_teams: {preliminary_teams}")
-                    
+                    #print(f"Preliminary_teams: {preliminary_teams}")
+
                     #We take the last n teams by fame and put them into first round
                     cur.execute("""
                         UPDATE clubs_competition
@@ -2148,60 +1802,60 @@ def cup_manage(competition_id: int):
                             )
                         )
                     """, (next_cup_round, competition_id,preliminary_teams,))
-    
+
                     conn.commit()
-                    
+
                     #First round
                     cur.execute("""
                         INSERT INTO fixtures(home_club_id, away_club_id, date, competition_id, played, competition_round)
                         SELECT home_id, away_id, match_date, ? as competition_id, 0 as played, ? as competition_round FROM (
-                        	WITH ordered AS (
-                        		SELECT 
-                        			ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn,
-                        			COUNT(*) OVER () AS total,
-                        			c.id AS club_id,
-                        			c.name
-                        		FROM clubs c
-                        		JOIN clubs_competition cl ON cl.club_id = c.id
-                        		WHERE cl.competition_id = ?
-                        		  AND cl.is_active
-                        		  AND cl.round = ?
-                        	)
-                        	SELECT 
-                        		t1.club_id AS home_id, 
-                        		t2.club_id AS away_id, 
-                        	CASE
-                        		WHEN t1.rn <= t1.total / 2
-                        			THEN date(gv.value_date, 'weekday 2', '+7 days')   -- Tuesday
-                        		ELSE
-                        			date(gv.value_date, 'weekday 3', '+7 days')        -- Wednesday
-                        	END AS match_date
-                        	FROM ordered t1
-                        	JOIN ordered t2 
-                        	  ON t2.rn = t1.rn + 1
-                        	JOIN global_val gv 
-                        	  ON gv.var_name = 'GAME_DATE'
-                        	WHERE t1.rn % 2 = 1
-                        	ORDER BY t1.rn
-                        ) 
+                               WITH ordered AS (
+                                               SELECT
+                                                               ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn,
+                                                               COUNT(*) OVER () AS total,
+                                                               c.id AS club_id,
+                                                               c.name
+                                               FROM clubs c
+                                               JOIN clubs_competition cl ON cl.club_id = c.id
+                                               WHERE cl.competition_id = ?
+                                                 AND cl.is_active
+                                                 AND cl.round = ?
+                               )
+                               SELECT
+                                               t1.club_id AS home_id,
+                                               t2.club_id AS away_id,
+                               CASE
+                                               WHEN t1.rn <= t1.total / 2
+                                                               THEN date(gv.value_date, 'weekday 2', '+14 days')   -- Tuesday
+                                               ELSE
+                                                               date(gv.value_date, 'weekday 3', '+14 days')        -- Wednesday
+                               END AS match_date
+                               FROM ordered t1
+                               JOIN ordered t2
+                                 ON t2.rn = t1.rn + 1
+                               JOIN global_val gv
+                                 ON gv.var_name = 'GAME_DATE'
+                               WHERE t1.rn % 2 = 1
+                               ORDER BY t1.rn
+                        )
                         final_query
                     """, (competition_id, next_cup_round, competition_id,next_cup_round,))
                     print(f"First leg for round {next_cup_round} created")
                     conn.commit()
-                    
+
                     #Second round, if there are more than 4 teams
-                    
+
                     if total_clubs >= 4:
                         cur.execute("""
                             INSERT INTO fixtures(home_club_id, away_club_id, date, competition_id, played, competition_round)
                             SELECT f.away_club_id as home_club_id, f.home_club_id as away_club_id, date(f.date, '+7 days'), ? as competition_id, 0 as played, ? as competition_round
                             FROM fixtures f WHERE competition_id = ? and played = 0 and competition_round = ?
                         """, (competition_id, next_cup_round, competition_id,next_cup_round,))
-        
+
                         conn.commit()
                         print(f"Second leg for round {next_cup_round} created")
-                
-               
+
+
                 elif total_clubs > 16:
                     print("Adjusting to get 16 teams")
                     round_target=16
@@ -2233,7 +1887,7 @@ if __name__ == "__main__":
     # If you reset DB, (optionally) load clubs from CSV:
     depopulate_clubs()
     populate_clubs()
-    
+
     populate_competition_clubs()
 
     update_game_date_db()           # keep GAME_DATE in DB in sync
@@ -2241,15 +1895,15 @@ if __name__ == "__main__":
     # Fresh players & fixtures each run (like your previous workflow)
     depopulate_players()
     #populate_400_players()
-    populate_800_players()
+    populate_all_players()
 
     depopulate_fixtures()
     populate_fixtures(1)
     populate_fixtures(2)
-    
+
     cup_manage(3)
-    
-    
+
+
 
     # FA Cup: usar semillado con fama para byes + prelim
     #conn = sqlite3.connect(DB_PATH)
