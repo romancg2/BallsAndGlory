@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?><sqlb_project><db path="fm_database.sqlite" readonly="0" foreign_keys="1" case_sensitive_like="0" temp_store="0" wal_autocheckpoint="1000" synchronous="2"/><attached/><window><main_tabs open="structure browser pragmas query" current="1"/></window><tab_structure><column_width id="0" width="300"/><column_width id="1" width="0"/><column_width id="2" width="100"/><column_width id="3" width="2980"/><column_width id="4" width="0"/><expanded_item id="0" parent="1"/><expanded_item id="1" parent="1"/><expanded_item id="2" parent="1"/><expanded_item id="3" parent="1"/></tab_structure><tab_browse><table title="players_attr" custom_title="0" dock_id="4" table="4,12:mainplayers_attr"/><dock_state state="000000ff00000000fd0000000100000002000005bb00000390fc0100000004fb000000160064006f0063006b00420072006f00770073006500310100000000000005bb0000000000000000fb000000160064006f0063006b00420072006f00770073006500320100000000000005bb0000000000000000fb000000160064006f0063006b00420072006f00770073006500350100000000000002480000000000000000fb000000160064006f0063006b00420072006f00770073006500340100000000000005bb0000012900ffffff000005bb0000000000000004000000040000000800000008fc00000000"/><default_encoding codec=""/><browse_table_settings><table schema="main" name="clubs" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="0"/></sort><column_widths><column index="1" value="35"/><column index="2" value="191"/><column index="3" value="77"/><column index="4" value="65"/><column index="5" value="255"/><column index="6" value="39"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="clubs_competition" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="1" mode="0"/></sort><column_widths><column index="1" value="129"/><column index="2" value="50"/><column index="3" value="95"/><column index="4" value="59"/><column index="5" value="41"/></column_widths><filter_values><column index="2" value="=3"/></filter_values><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="clubs_monthly_economy" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="2" mode="0"/></sort><column_widths><column index="1" value="35"/><column index="2" value="87"/><column index="3" value="50"/><column index="4" value="83"/><column index="5" value="111"/><column index="6" value="78"/><column index="7" value="96"/><column index="8" value="87"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="competitions" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="35"/><column index="2" value="119"/><column index="3" value="63"/><column index="4" value="35"/><column index="5" value="47"/><column index="6" value="39"/><column index="7" value="99"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="fixtures" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="1" mode="0"/></sort><column_widths><column index="1" value="39"/><column index="2" value="87"/><column index="3" value="89"/><column index="4" value="87"/><column index="5" value="93"/><column index="6" value="77"/><column index="7" value="75"/><column index="8" value="46"/><column index="9" value="116"/><column index="10" value="98"/><column index="11" value="96"/></column_widths><filter_values><column index="4" value="=3"/></filter_values><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="match_scorers" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="2" mode="0"/></sort><column_widths><column index="1" value="39"/><column index="2" value="63"/><column index="3" value="65"/><column index="4" value="79"/></column_widths><filter_values><column index="1" value="=220"/></filter_values><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="players" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="9" mode="1"/></sort><column_widths><column index="1" value="35"/><column index="2" value="103"/><column index="3" value="175"/><column index="4" value="87"/><column index="5" value="263"/><column index="6" value="53"/><column index="7" value="50"/><column index="8" value="71"/><column index="9" value="63"/><column index="10" value="88"/><column index="11" value="63"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="players_attr" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="63"/><column index="2" value="50"/><column index="3" value="72"/><column index="4" value="67"/><column index="5" value="84"/><column index="6" value="72"/><column index="7" value="82"/><column index="8" value="83"/><column index="9" value="61"/><column index="10" value="76"/><column index="11" value="96"/><column index="12" value="83"/><column index="13" value="70"/><column index="14" value="68"/><column index="15" value="84"/><column index="16" value="88"/><column index="17" value="55"/><column index="18" value="92"/><column index="19" value="88"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="players_contract" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="6" mode="1"/></sort><column_widths><column index="1" value="35"/><column index="2" value="63"/><column index="3" value="50"/><column index="4" value="103"/><column index="5" value="91"/><column index="6" value="87"/><column index="7" value="63"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="staff" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="8" mode="0"/></sort><column_widths><column index="1" value="35"/><column index="2" value="70"/><column index="3" value="68"/><column index="4" value="217"/><column index="5" value="167"/><column index="6" value="321"/><column index="7" value="88"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="staff_attr" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="53"/><column index="2" value="96"/><column index="3" value="72"/><column index="4" value="70"/><column index="5" value="76"/><column index="6" value="64"/><column index="7" value="71"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="staff_contract" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="6" mode="1"/></sort><column_widths><column index="1" value="35"/><column index="2" value="53"/><column index="3" value="50"/><column index="4" value="119"/><column index="5" value="91"/><column index="6" value="87"/><column index="7" value="162"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table></browse_table_settings></tab_browse><tab_sql><sql name="Players attributes">select p.id, first_name, last_name, date_of_birth, gv.value_date-date_of_birth as agevalue, position, nationality, value, is_retired, pa.*, cl.name
+<?xml version="1.0" encoding="UTF-8"?><sqlb_project><db path="fm_database.sqlite" readonly="0" foreign_keys="1" case_sensitive_like="0" temp_store="0" wal_autocheckpoint="1000" synchronous="2"/><attached/><window><main_tabs open="structure browser pragmas query" current="3"/></window><tab_structure><column_width id="0" width="300"/><column_width id="1" width="0"/><column_width id="2" width="100"/><column_width id="3" width="2980"/><column_width id="4" width="0"/><expanded_item id="0" parent="1"/><expanded_item id="1" parent="1"/><expanded_item id="2" parent="1"/><expanded_item id="3" parent="1"/></tab_structure><tab_browse><table title="clubs" custom_title="0" dock_id="4" table="4,5:mainclubs"/><dock_state state="000000ff00000000fd0000000100000002000005bb00000390fc0100000004fb000000160064006f0063006b00420072006f00770073006500310100000000000005bb0000000000000000fb000000160064006f0063006b00420072006f00770073006500320100000000000005bb0000000000000000fb000000160064006f0063006b00420072006f00770073006500350100000000000002480000000000000000fb000000160064006f0063006b00420072006f00770073006500340100000000000005bb0000012900ffffff000005bb0000000000000004000000040000000800000008fc00000000"/><default_encoding codec=""/><browse_table_settings><table schema="main" name="clubs" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="35"/><column index="2" value="191"/><column index="3" value="77"/><column index="4" value="65"/><column index="5" value="255"/><column index="6" value="39"/><column index="7" value="130"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="clubs_competition" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="1" mode="0"/></sort><column_widths><column index="1" value="129"/><column index="2" value="50"/><column index="3" value="95"/><column index="4" value="59"/><column index="5" value="41"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="clubs_histo" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="0"/></sort><column_widths><column index="1" value="35"/><column index="2" value="191"/><column index="3" value="77"/><column index="4" value="63"/><column index="5" value="255"/><column index="6" value="39"/><column index="7" value="130"/><column index="8" value="99"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="clubs_monthly_economy_histo" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="2" mode="0"/></sort><column_widths><column index="1" value="35"/><column index="2" value="87"/><column index="3" value="48"/><column index="4" value="83"/><column index="5" value="111"/><column index="6" value="78"/><column index="7" value="96"/><column index="8" value="87"/><column index="9" value="99"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="fixtures" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="39"/><column index="2" value="87"/><column index="3" value="89"/><column index="4" value="87"/><column index="5" value="93"/><column index="6" value="77"/><column index="7" value="75"/><column index="8" value="46"/><column index="9" value="116"/><column index="10" value="98"/><column index="11" value="96"/><column index="12" value="63"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="players" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="1"/></sort><column_widths><column index="1" value="35"/><column index="2" value="127"/><column index="3" value="103"/><column index="4" value="87"/><column index="5" value="295"/><column index="6" value="116"/><column index="7" value="53"/><column index="8" value="107"/><column index="9" value="71"/><column index="10" value="63"/><column index="11" value="39"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="players_attr" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="1"/></sort><column_widths><column index="1" value="63"/><column index="2" value="50"/><column index="3" value="72"/><column index="4" value="67"/><column index="5" value="84"/><column index="6" value="72"/><column index="7" value="82"/><column index="8" value="83"/><column index="9" value="61"/><column index="10" value="76"/><column index="11" value="96"/><column index="12" value="83"/><column index="13" value="70"/><column index="14" value="68"/><column index="15" value="84"/><column index="16" value="88"/><column index="17" value="55"/><column index="18" value="92"/><column index="19" value="88"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="players_attr_histo" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="0"/></sort><column_widths><column index="1" value="61"/><column index="2" value="50"/><column index="3" value="72"/><column index="4" value="67"/><column index="5" value="84"/><column index="6" value="72"/><column index="7" value="82"/><column index="8" value="83"/><column index="9" value="61"/><column index="10" value="76"/><column index="11" value="96"/><column index="12" value="83"/><column index="13" value="70"/><column index="14" value="68"/><column index="15" value="84"/><column index="16" value="88"/><column index="17" value="55"/><column index="18" value="92"/><column index="19" value="88"/><column index="20" value="99"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="players_contract" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="3" mode="1"/></sort><column_widths><column index="1" value="39"/><column index="2" value="63"/><column index="3" value="50"/><column index="4" value="135"/><column index="5" value="91"/><column index="6" value="87"/><column index="7" value="63"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="players_contract_histo" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="1" mode="0"/></sort><column_widths><column index="1" value="65"/><column index="2" value="61"/><column index="3" value="48"/><column index="4" value="178"/><column index="5" value="91"/><column index="6" value="87"/><column index="7" value="63"/><column index="8" value="99"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="staff" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="0"/></sort><column_widths><column index="1" value="35"/><column index="2" value="95"/><column index="3" value="87"/><column index="4" value="87"/><column index="5" value="95"/><column index="6" value="300"/><column index="7" value="127"/><column index="8" value="39"/><column index="9" value="50"/><column index="10" value="109"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="staff_attr" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="9" mode="1"/></sort><column_widths><column index="1" value="53"/><column index="2" value="96"/><column index="3" value="72"/><column index="4" value="70"/><column index="5" value="76"/><column index="6" value="64"/><column index="7" value="71"/><column index="8" value="75"/><column index="9" value="92"/><column index="10" value="88"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="staff_attr_histo" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="1"/></sort><column_widths><column index="1" value="51"/><column index="2" value="96"/><column index="3" value="72"/><column index="4" value="70"/><column index="5" value="76"/><column index="6" value="64"/><column index="7" value="71"/><column index="8" value="75"/><column index="9" value="92"/><column index="10" value="88"/><column index="11" value="99"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="staff_contract" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="1"/></sort><column_widths><column index="1" value="35"/><column index="2" value="53"/><column index="3" value="50"/><column index="4" value="103"/><column index="5" value="91"/><column index="6" value="87"/><column index="7" value="63"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="staff_histo" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="0"/></sort><column_widths><column index="1" value="35"/><column index="2" value="95"/><column index="3" value="87"/><column index="4" value="87"/><column index="5" value="95"/><column index="6" value="300"/><column index="7" value="127"/><column index="8" value="39"/><column index="9" value="48"/><column index="10" value="107"/><column index="11" value="99"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table></browse_table_settings></tab_browse><tab_sql><sql name="Players attributes">select p.id, first_name, last_name, date_of_birth, gv.value_date-date_of_birth as agevalue, position, nationality, value, is_retired, pa.*, cl.name
 from 
 players p 
 join players_attr pa on p.id = pa.player_id
@@ -184,6 +184,30 @@ WHERE cs.competition_id = 2
 ORDER BY cs.season, cs.points DESC, goal_diff DESC, cs.goals_for DESC, c.name
 )
 where season = '2025-2026';
+</sql><sql name="Free transfers players">select p.id, first_name, last_name, date_of_birth, gv.value_date-date_of_birth as agevalue, position, nationality, value/1000000, is_retired, 
+
+--at_luck/100, 
+--at_selfcont/100, 
+--at_honour/100, 
+--at_crazyness/100, 
+at_working/100, 
+--at_sexatract/100, 
+--at_friendship/100, 
+at_speed/100, 
+at_dribbling/100, 
+at_goalkeeping/100, 
+at_defending/100, 
+at_passing/100, 
+at_scoring/100, 
+--at_happiness/100, 
+--at_confidence/100, 
+--at_hope/100, 
+at_curr_ability/10, 
+at_pot_ability/10
+FROM players p
+JOIN players_attr pa ON p.id = pa.player_id
+LEFT JOIN global_val gv ON gv.var_name = 'GAME_DATE'
+where p.club_id is null
 </sql><sql name="Players by club">select p.id, first_name, last_name, date_of_birth, gv.value_date-date_of_birth as agevalue, position, nationality, value/1000000 value_millions, is_retired, 
 
 --at_luck/100, 
@@ -219,13 +243,16 @@ join players_contract pc on p.id = pc.player_id
 left join global_val gv on 1 = 1
 where gv.var_name = 'GAME_DATE' --and NOT is_retired 
 --and cl.name = 'Liverpool'
-and cl.name = 'Arsenal'
+--and cl.name = 'Arsenal'
 --and cl.name = 'Manchester City'
 --and cl.name = 'AFC Bournemouth'
 --and cl.name = 'Brentford'
 --and cl.name = 'Watford'
---and cl.name = 'Bristol City'
-
+--and cl.name = 'Bristol City'
+and cl.name = 'Portsmouth'
+and gv.value_date BETWEEN pc.contract_start AND
+pc.contract_end
+order by position
 --and cl.name = 'Norwich City'
 
 
@@ -358,24 +385,24 @@ JOIN players_attr pa ON p.id = pa.player_id
 JOIN clubs cl ON p.club_id = cl.id
 LEFT JOIN global_val gv ON gv.var_name = 'GAME_DATE'
 where p.id &gt; 880
-</sql><sql name="Fixtures by club*">
+</sql><sql name="Fixtures by club">
 SELECT 
 f.fixture_date, c_home.name, f.home_goals, c_away.name, f.away_goals, co.name, f.season
 FROM fixtures f 
 LEFT JOIN clubs c_home ON c_home.id = f.home_club_id 
-LEFT JOIN clubs c_away ON c_away.id = f.away_club_id 
+LEFT JOIN clubs c_away ON c_away.id = f.away_club_id 
 JOIN competitions co ON f.competition_id = co.id
 WHERE --f.played = 1
 --GROUP BY c.id
 --and 
-(c_home.name = 'Preston North End' or c_away.name = 'Preston North End')
-AND season = '2027/28'
+(c_home.name = 'Manchester United' or c_away.name = 'Manchester United')
+AND season = '2025/26'
 ORDER by f.fixture_date
 
 ;
 
 
-</sql><sql name="Cup schedule check*">SELECT 
+</sql><sql name="Cup schedule check">SELECT 
     f.fixture_date,
     c_home.name AS home_club,
 	c_home.id AS home_id_club,
@@ -402,7 +429,7 @@ JOIN clubs_competition cc_away
     ON cc_away.club_id = c_away.id 
    AND cc_away.competition_id = co.id
 WHERE co.id = 3
---and (home_id_club = 23 or away_club_id = 23)
+--and (home_id_club = 23 or away_club_id = 23)
 and season = '2025/26'
 ORDER BY f.fixture_date, c_home.name;
 
@@ -468,22 +495,73 @@ where gv.var_name = 'GAME_DATE' --and NOT is_retired
 
 --and at_scoring &gt; 1500
 --and cl.id = 7
---order by at_pot_ability desc</sql><sql name="SQL 24">
-		select p.first_name || ' ' || p.last_name as full_name, p.id as player_id, p.position, p.value, c.name as club_name, f.fixture_date
-		
-					,CASE 
-					WHEN strftime('%m-%d', f.fixture_date) BETWEEN '08-01' AND '12-31'
-						 THEN strftime('%Y', f.fixture_date) || '-' || (CAST(strftime('%Y', f.fixture_date) AS INTEGER) + 1)
-					ELSE (CAST(strftime('%Y', f.fixture_date) AS INTEGER) - 1) || '-' || strftime('%Y', f.fixture_date)
-				END AS season
-		
-		from  match_scorers ms
-		join fixtures f on f.id = ms.fixture_id
-		join clubs c on f.home_club_id = c.id or f.away_club_id = c.id 
-		join clubs_competition cs on f.competition_id = cs.competition_id and c.id = cs.club_id
-		join players p on p.id = ms.player_id and p.club_id = c.id
-		join players_attr pa on p.id = pa.player_id
-		where cs.competition_id = 3</sql><sql name="SQL 25">            SELECT IFNULL(MAX(competition_round), 0)+1
+--order by at_pot_ability desc</sql><sql name="Managers regens">select 
+
+s.id, first_name, last_name, gv.value_date-date_of_birth as agevalue, nationality, role,
+at_goalkeeping/100,
+at_tackling/100,
+at_passing/100,
+at_shooting/100,
+at_physio/100,
+at_medical/100,
+at_scouting/100,
+at_curr_ability/100,
+at_pot_ability/100
+
+from 
+staff s 
+join staff_attr sa on s.id = sa.staff_id
+left join global_val gv on 1 = 1
+where gv.var_name = 'GAME_DATE' 
+--and is_retired
+and s.club_id is null</sql><sql name="Free transfers staff">select 
+
+s.id, first_name, last_name, gv.value_date-date_of_birth as agevalue, nationality, role,
+cl.name as club_name,
+at_goalkeeping/100,
+at_tackling/100,
+at_passing/100,
+at_shooting/100,
+at_physio/100,
+at_medical/100,
+at_scouting/100,
+sc.wage, sc.contract_start, sc.contract_end
+
+from 
+staff s 
+join staff_attr sa on s.id = sa.staff_id
+left join clubs cl on s.club_id = cl.id
+left join staff_contract sc on s.id = sc.staff_id
+left join global_val gv on 1 = 1
+where gv.var_name = 'GAME_DATE' --and NOT is_retired 
+and s.club_id is null
+--and cl.name = 'Liverpool'
+--and cl.name = 'Arsenal'
+--and cl.name = 'Manchester City'
+--and cl.name = 'AFC Bournemouth'
+--and cl.name = 'Brentford'
+--and cl.name = 'Watford'
+--and cl.name = 'Bristol City'
+
+--and cl.name = 'Norwich City'
+
+
+--and at_scoring &gt; 1500
+--and cl.id = 7
+--order by at_pot_ability desc</sql><sql name="SQL 25">            SELECT IFNULL(MAX(competition_round), 0)+1
             FROM fixtures f
     		LEFT JOIN global_val gv on 1 = 1 and gv.var_name = 'GAME_DATE'
-            WHERE competition_id = 3 and played = 0</sql><current_tab id="13"/></tab_sql></sqlb_project>
+            WHERE competition_id = 3 and played = 0</sql><sql name="SQL 20">        SELECT c.id, c.name,
+               COALESCE(SUM(CASE
+                       WHEN f.home_club_id = c.id AND f.home_goals &gt; f.away_goals THEN 3
+                       WHEN f.away_club_id = c.id AND f.away_goals &gt; f.home_goals THEN 3
+                       WHEN f.home_goals = f.away_goals AND (f.home_club_id = c.id OR f.away_club_id = c.id) THEN 1
+                       ELSE 0 END), 0) as points,
+               COALESCE(SUM(CASE WHEN f.home_club_id = c.id THEN f.home_goals ELSE f.away_goals END), 0) as goals_for,
+               COALESCE(SUM(CASE WHEN f.home_club_id = c.id THEN f.away_goals ELSE f.home_goals END), 0) as goals_against
+        FROM clubs c
+        LEFT JOIN fixtures f ON (f.home_club_id = c.id OR f.away_club_id = c.id)
+        WHERE c.league_id = 1
+        GROUP BY c.id
+        ORDER BY points ASC, (goals_for - goals_against) ASC
+        LIMIT 3</sql><current_tab id="5"/></tab_sql></sqlb_project>
