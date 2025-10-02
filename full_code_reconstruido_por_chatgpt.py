@@ -12,6 +12,10 @@ from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 import datetime as dt
 
+import decision_making
+
+
+
 # -----------------------------
 # Paths & SQLite 3.12 adapters
 # -----------------------------
@@ -44,6 +48,15 @@ LEAGUE_ATK_MEAN = None
 LEAGUE_DEF_MEAN = None
 
 SCORER_BOOST = 1.15
+
+# Tables that should have seasonal snapshots
+SNAPSHOT_TABLES = (
+    "players",
+    "players_attr",
+    "staff",
+    "staff_attr",
+    "clubs"  
+)
 
 # Fame → name fakers
 fakers = {
@@ -245,6 +258,7 @@ def init_db():
         value INTEGER,
         is_retired BOOLEAN DEFAULT FALSE,
         fame INTEGER DEFAULT 0,
+        peak_fame INTEGER DEFAULT 0,
         FOREIGN KEY (club_id) REFERENCES clubs(id)
     );
 
@@ -294,6 +308,7 @@ def init_db():
         fame INTEGER DEFAULT 0,
         club_id INTEGER,
         former_player_id INTEGER,
+        is_retired BOOLEAN DEFAULT FALSE,
         FOREIGN KEY (former_player_id) REFERENCES players(id),
         FOREIGN KEY (club_id) REFERENCES clubs(id)
     );
@@ -319,6 +334,8 @@ def init_db():
         at_physio INTEGER,
         at_medical INTEGER,
         at_scouting INTEGER,
+        at_curr_ability INTEGER,
+        at_pot_ability INTEGER,
         FOREIGN KEY (staff_id) REFERENCES staff(id)
     );
 
@@ -739,7 +756,7 @@ def renew_expired_contracts(conn, game_date):
         wage = max(150_000, min(base_wage, 20_000_000))
 
         # New contract starts next day (1 Sep) and ends 1–3 years later
-        start_year = game_date.year + 1  # since contract_start is 1 Sep
+        start_year = game_date.year  # since contract_start is 1 Sep
         contract_start = date(start_year, 9, 1)
         contract_end = date(start_year + random.randint(1, 3), 8, 31)
 
@@ -750,11 +767,113 @@ def renew_expired_contracts(conn, game_date):
         """, (player_id, club_id, "Renewed Contract",
               contract_start.isoformat(), contract_end.isoformat(), wage))
 
-        print(f"📝 Renewed contract for player {player_id} at club {club_id}: {wage}€/year until {contract_end}")
+        #print(f"📝 Renewed contract for player {player_id} at club {club_id}: {wage}€/year until {contract_end}")
+
+    conn.commit()
+    
+def renew_expired_staff_contracts(conn, game_date):
+    """
+    Renew staff contracts that end on the given game_date (e.g., 31 Aug).
+    """
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT sc.staff_id, sc.club_id, s.role, s.fame
+        FROM staff_contract sc
+        JOIN staff s ON sc.staff_id = s.id
+        WHERE sc.contract_end = ?
+    """, (game_date.isoformat(),))
+
+    expired_staff = cur.fetchall()
+    if not expired_staff:
+        print("📄 No staff contracts to renew.")
+        return
+
+    for staff_id, club_id, role, fame in expired_staff:
+        # Wage scaling depending on role + fame
+        if role == "Physio":
+            wage = random.randint(50_000, 200_000)
+        elif role == "Medical":
+            wage = random.randint(80_000, 250_000)
+        elif role == "Scout":
+            wage = random.randint(100_000, 400_000)
+        elif role == "Assistant Coach":
+            wage = random.randint(200_000, 600_000)
+        elif role == "Manager":
+            fame_factor = (fame / 2000.0) if fame else 1.0
+            wage = int(random.randint(500_000, 2_000_000) * fame_factor)
+        elif role == "Coach":
+            wage = random.randint(100_000, 400_000)
+        else:
+            wage = random.randint(50_000, 300_000)
+
+        # New contract starts in the current year (1 Sep)
+        start_year = game_date.year
+        contract_start = date(start_year, 9, 1)
+        contract_end = date(start_year + random.randint(1, 3), 8, 31)
+
+        cur.execute("""
+            INSERT INTO staff_contract (
+                staff_id, club_id, contract_type, contract_start, contract_end, wage
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """, (staff_id, club_id, "Renewed Contract",
+              contract_start.isoformat(), contract_end.isoformat(), wage))
+
+        #print(f"📝 Renewed contract for staff {staff_id} ({role}) at club {club_id}: {wage}€/year until {contract_end}")
 
     conn.commit()
 
 
+def calculate_staff_fame(age, club_fame, role):
+    # Managers and Assistant Coaches get more fame
+    role_mult = {
+        "Manager": 1.0,
+        "Assistant Coach": 0.8,
+        "Coach": 0.6,
+        "Physio": 0.4,
+        "Medical": 0.4,
+        "Scout": 0.5
+    }.get(role, 0.5)
+    # Age: peak at 45-55
+    if age < 30:
+        age_mult = 0.5
+    elif age < 40:
+        age_mult = 0.8
+    elif age < 56:
+        age_mult = 1.0
+    elif age < 65:
+        age_mult = 0.7
+    else:
+        age_mult = 0.4
+    # Club fame normalized (0.5–1.0)
+    club_mult = 0.5 + (club_fame / 4000.0)
+    fame = 2000 * role_mult * age_mult * club_mult
+    return int(max(1, min(fame, 2000)))
+
+def calculate_player_fame(age, curr_ability, club_fame):
+    # Normalize ability (0–1)
+    ability_score = curr_ability / 2000.0
+
+    # Age effect: peak at 27, less for very young/old
+    if age < 20:
+        age_mult = 0.4
+    elif age < 24:
+        age_mult = 0.7
+    elif age < 30:
+        age_mult = 1.0
+    elif age < 34:
+        age_mult = 0.6
+    else:
+        age_mult = 0.3
+
+    # Club fame effect (normalize to 0.5–1.0)
+    club_mult = 0.5 + (club_fame / 4000.0)  # max 1.0 if club_fame=2000
+
+    # Fame formula (max possible: 2000 * 1.0 * 1.0 = 2000, but only for perfect player at perfect club and age)
+    fame = 2000 * ability_score * age_mult * club_mult
+
+    # Clamp to 1–2000
+    return int(max(1, min(fame, 2000)))
 
 def generate_player(position=None, club_id=None, club_fame=None, force_youth=False):
     # --- Identity ---
@@ -826,10 +945,16 @@ def generate_player(position=None, club_id=None, club_fame=None, force_youth=Fal
     curr_ability = int(min(pot_ability * curr_pct * fame_norm, pot_ability))
     attrs = distribute_attributes(curr_ability, pot_ability, position)
 
+    # --- Fame ---
+    fame = calculate_player_fame(age, curr_ability, club_fame)
+
     # --- Pack results ---
     player_attr = tuple(attrs[a] for a in attrs) + (curr_ability, pot_ability)
+
+    # Include peak_fame as equal to fame at creation
     player = (first_name, last_name, date_of_birth, nationality,
-              position, club_id, value)
+              position, club_id, value, fame, fame)  # last fame = peak_fame
+
     contract = (club_id, "Professional", contract_start.isoformat(),
                 contract_end.isoformat(), wage)
 
@@ -854,23 +979,24 @@ def depopulate_players():
 def maybe_convert_to_staff(conn, player_id):
     cur = conn.cursor()
 
-    # Get player info
     cur.execute("""
-        SELECT club_id, first_name, last_name, fame, position, date_of_birth, nationality, second_nationality
+        SELECT club_id, first_name, last_name, fame, peak_fame,
+               position, date_of_birth, nationality, second_nationality
         FROM players WHERE id = ?
     """, (player_id,))
     row = cur.fetchone()
     if not row:
         return
-    _club_id, first_name, last_name, fame, pos, dob, nat, nat2 = row
+    _club_id, first_name, last_name, fame, peak_fame, pos, dob, nat, nat2 = row
 
-    # Chance to convert
-    chance = 0.05
-    if fame > 800: chance += 0.10
+    # Base chance
+    chance = 0.30
+    if fame > 800 or peak_fame > 1000:
+        chance += 0.20
     if random.random() > chance:
         return
 
-    # Pick role(s)
+    # Role choices
     roles = []
     if pos == "GK":
         roles.append("Goalkeeping Coach")
@@ -881,14 +1007,20 @@ def maybe_convert_to_staff(conn, player_id):
     else:
         roles.append("Coach")
 
-    if fame > 700:
+    if peak_fame > 700:
         roles.append("Assistant Manager")
-    if fame > 500:
+    if peak_fame > 500:
         roles.append("Scout")
+    if peak_fame > 800:
+        roles.append("Manager")
+
+    # Flat 2% legendary chance
+    if random.random() < 0.02:
+        roles.append("Manager")
 
     role = random.choice(roles)
 
-    # Insert staff record as UNEMPLOYED (no club_id)
+    # Insert into staff...
     cur.execute("""
         INSERT INTO staff (first_name, last_name, date_of_birth, nationality,
                            second_nationality, role, fame, club_id, former_player_id)
@@ -896,42 +1028,142 @@ def maybe_convert_to_staff(conn, player_id):
     """, (first_name, last_name, dob, nat, nat2, role, fame, player_id))
     staff_id = cur.lastrowid
 
-    # Map player attributes → staff attributes
-    cur.execute("""
-        SELECT at_goalkeeping, at_defending, at_passing, at_scoring
-        FROM players_attr WHERE player_id = ?
-    """, (player_id,))
-    pa = cur.fetchone() or (0, 0, 0, 0)
-    gk, tac, pas, sho = pa
+    # Carry over attributes as before...
+    cur.execute("SELECT at_goalkeeping, at_defending, at_passing, at_scoring FROM players_attr WHERE player_id = ?", (player_id,))
+    gk, tac, pas, sho = cur.fetchone() or (0, 0, 0, 0)
+    
+    
+    # Base staff ability, with realistic spread
+    base = random.randint(750, 1250) + (peak_fame // 10)
+    base = min(base, 1700)
 
-    if role == "Scout":
-        at_scouting = fame // 5 + random.randint(100, 300)
+    if role == "Manager":
+        gk_attr = gk // 3
+        tac_attr = base + random.randint(50, 150)
+        pas_attr = pas // 2
+        sho_attr = sho // 2
+        at_scouting = base // 2 + random.randint(100, 300)
     elif role == "Assistant Manager":
-        at_scouting = fame // 10 + random.randint(50, 150)
-    else:
-        at_scouting = fame // 15 + random.randint(20, 100)
+        gk_attr = gk // 3
+        tac_attr = base
+        pas_attr = pas // 2
+        sho_attr = sho // 2
+        at_scouting = base // 3 + random.randint(50, 200)
+    elif role == "Scout":
+        gk_attr = gk // 4
+        tac_attr = tac // 3
+        pas_attr = pas // 3
+        sho_attr = sho // 3
+        at_scouting = base + random.randint(100, 400)
+    elif role == "Goalkeeping Coach":
+        gk_attr = base + random.randint(50, 200)
+        tac_attr = tac // 2
+        pas_attr = pas // 2
+        sho_attr = sho // 2
+        at_scouting = base // 4 + random.randint(20, 100)
+    else:  # generic Coach
+        gk_attr = gk // 2
+        tac_attr = base
+        pas_attr = base // 2
+        sho_attr = base // 2
+        at_scouting = base // 5 + random.randint(20, 80)
 
+    # Curr/pot ability for staff
+    curr_ability = max(700, base + random.randint(-100, 150))
+    pot_ability  = min(2000, curr_ability + random.randint(300, 700))
+
+    # Insert into staff_attr (with new fields)
     cur.execute("""
         INSERT INTO staff_attr (staff_id, at_goalkeeping, at_tackling, at_passing,
-                                at_shooting, at_physio, at_medical, at_scouting)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                at_shooting, at_physio, at_medical, at_scouting,
+                                at_curr_ability, at_pot_ability)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         staff_id,
-        gk // 2,
-        tac // 2,
-        pas // 2,
-        sho // 2,
-        random.randint(200, 600),   # physio
-        random.randint(200, 600),   # medical
-        at_scouting
+        gk_attr,
+        tac_attr,
+        pas_attr,
+        sho_attr,
+        random.randint(400, 900),  # physio
+        random.randint(400, 900),  # medical
+        at_scouting,
+        curr_ability,
+        pot_ability
     ))
 
     conn.commit()
     print(f"👔 {first_name} {last_name} retired and became an UNEMPLOYED {role} (staff_id={staff_id})")
 
+
+
 # -----------------------------
 # Weekly progression
 # -----------------------------
+
+def update_staff_in_db(conn, game_date):
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT s.id, s.date_of_birth, s.role, s.club_id,
+               sa.at_curr_ability, sa.at_pot_ability
+        FROM staff s
+        JOIN staff_attr sa ON s.id = sa.staff_id
+        WHERE s.is_retired = 0
+    """)
+    staff = cur.fetchall()
+
+    for staff_id, birth_date, role, club_id, curr_ability, pot_ability in staff:
+        age = calculate_age(birth_date, game_date)
+
+        # 🎲 Retirement chance (fixed so nobody retires before 65)
+        retire = False
+        if age >= 75:
+            retire = True
+        elif age >= 70:
+            chance = 0.25 if club_id else 0.50  # 25% if employed, 50% if unemployed
+            if random.random() < chance:
+                retire = True
+        elif age >= 65:
+            chance = 0.10 if club_id else 0.20  # small chance starts only at 65
+            if random.random() < chance:
+                retire = True
+
+        if retire:
+            cur.execute("""
+                UPDATE staff
+                SET is_retired = 1, club_id = NULL
+                WHERE id = ?
+            """, (staff_id,))
+            print(f"👴 Staff {staff_id} retired at age {age} ({role})")
+            continue
+
+        # --- Otherwise develop/decline ---
+        dev_gap = max(0, pot_ability - curr_ability)
+        if club_id is None:
+            if age < 45:
+                growth = dev_gap * 0.001 * random.uniform(0.5, 1.0)
+            elif age < 60:
+                growth = -curr_ability * 0.002 * random.uniform(0.8, 1.2)
+            else:
+                growth = -curr_ability * 0.006 * random.uniform(0.8, 1.2)
+        else:
+            if age < 40:
+                growth = dev_gap * 0.005 * random.uniform(0.8, 1.2)
+            elif age < 55:
+                growth = dev_gap * 0.002 * random.uniform(0.8, 1.2)
+            elif age < 65:
+                growth = -curr_ability * 0.004 * random.uniform(0.8, 1.2)
+            else:
+                growth = -curr_ability * 0.01 * random.uniform(0.8, 1.2)
+
+        new_curr_ability = int(clamp(curr_ability + growth, 100, min(pot_ability, 2000)))
+
+        cur.execute("""
+            UPDATE staff_attr
+            SET at_curr_ability=?
+            WHERE staff_id=?
+        """, (new_curr_ability, staff_id))
+
+    conn.commit()
 
 
 def update_players_in_db(conn, game_date):
@@ -954,6 +1186,7 @@ def update_players_in_db(conn, game_date):
     for player in players:
         player_id, birth_date, pos, club_id, curr_ability, pot_ability = player
         age = calculate_age(birth_date, game_date)
+        
 
         # --- Retirement check ---
         if age > 35:
@@ -972,12 +1205,19 @@ def update_players_in_db(conn, game_date):
                 position=pos, club_id=club_id,
                 club_fame=club_fame, force_youth=True
             )
+            
+            # Calculate age and ability for the new youth player
+            youth_age = calculate_age(youth[2], GAME_DATE)
+            youth_curr_ability = youth_attr[-2]  # at_curr_ability is second to last in youth_attr
+            youth_fame = calculate_player_fame(youth_age, youth_curr_ability, club_fame)
+            
+            # Insert player with fame
             cur.execute("""
                 INSERT INTO players (
                     first_name, last_name, date_of_birth, nationality,
-                    position, club_id, value
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, youth)
+                    position, club_id, value, fame
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (*youth[:6], youth[6], youth_fame))
             new_id = cur.lastrowid
 
             cur.execute("""
@@ -1049,11 +1289,15 @@ def update_players_in_db(conn, game_date):
         new_curr_ability = max(100, min(int(curr_ability + growth), pot_ability, 2000))
         attrs = distribute_attributes(new_curr_ability, pot_ability, pos)
 
+      
+        
+        
         # Update value with new ability
         cur.execute("SELECT fame FROM clubs WHERE id=?", (club_id,))
         row = cur.fetchone()
         club_fame = row[0] if row else 1000
         value = calculate_player_value(new_curr_ability, pot_ability, age, fame=club_fame)
+        fame = calculate_player_fame(age, new_curr_ability, club_fame)  # <-- Add this line
 
         # Save back
         cur.execute("""
@@ -1065,12 +1309,57 @@ def update_players_in_db(conn, game_date):
                 at_curr_ability=?, at_pot_ability=?
             WHERE player_id=?
         """, (*[attrs[a] for a in attrs], new_curr_ability, pot_ability, player_id))
-
-        cur.execute("UPDATE players SET value=? WHERE id=?", (value, player_id))
+        
+        # Update value and fame
+        cur.execute("""
+            UPDATE players
+            SET value=?,
+                fame=?,
+                peak_fame = MAX(peak_fame, ?)
+            WHERE id=?
+        """, (value, fame, fame, player_id))
 
     conn.commit()
 
+def update_fame_after_match(cur, club_id, result, fame_delta=10):
+    # Get club fame for scaling
+    cur.execute("SELECT fame FROM clubs WHERE id=?", (club_id,))
+    row = cur.fetchone()
+    club_fame = row[0] if row else 1000
+    # Scale: 1.0 at 1000 fame, 2.0 at 2000 fame
+    fame_scale = 1.0 + ((club_fame - 1000) / 1000.0)
+    fame_scale = max(1.0, min(fame_scale, 2.0))
 
+    if result == "win":
+        player_delta = fame_delta
+        staff_delta = fame_delta
+        manager_delta = fame_delta * 2
+    elif result == "loss":
+        player_delta = -fame_delta
+        staff_delta = -fame_delta
+        manager_delta = int(-fame_delta * 2 * fame_scale)
+    else:  # draw
+        player_delta = 0
+        staff_delta = 0
+        manager_delta = 0
+
+    # Update players
+    cur.execute("SELECT id, fame FROM players WHERE club_id=? AND is_retired=0", (club_id,))
+    for pid, fame in cur.fetchall():
+        new_fame = max(1, min(fame + player_delta, 2000))
+        cur.execute("UPDATE players SET fame=? WHERE id=?", (new_fame, pid))
+
+    # Update staff (except manager)
+    cur.execute("SELECT id, fame FROM staff WHERE club_id=? AND role != 'Manager'", (club_id,))
+    for sid, fame in cur.fetchall():
+        new_fame = max(1, min(fame + staff_delta, 2000))
+        cur.execute("UPDATE staff SET fame=? WHERE id=?", (new_fame, sid))
+
+    # Update manager
+    cur.execute("SELECT id, fame FROM staff WHERE club_id=? AND role = 'Manager'", (club_id,))
+    for sid, fame in cur.fetchall():
+        new_fame = max(1, min(fame + manager_delta, 2000))
+        cur.execute("UPDATE staff SET fame=? WHERE id=?", (new_fame, sid))
 
 # -----------------------------
 # Match simulation
@@ -1304,6 +1593,17 @@ def simulate_fixtures_for_day(conn, day):
 
         home_goals = poisson_draw(home_lambda, kmax=6)
         away_goals = poisson_draw(away_lambda, kmax=6)
+        
+        # Effect on fame for players and staff after win/lose
+        if home_goals > away_goals:
+            update_fame_after_match(cur, home_id, "win")
+            update_fame_after_match(cur, away_id, "loss")
+        elif home_goals < away_goals:
+            update_fame_after_match(cur, home_id, "loss")
+            update_fame_after_match(cur, away_id, "win")
+        else:
+            update_fame_after_match(cur, home_id, "draw")
+            update_fame_after_match(cur, away_id, "draw")
 
         scorers, names = [], []
         hs, hn = pick_scorers(cur, home_id, home_goals, fixture_id, home_name)
@@ -1739,46 +2039,106 @@ def update_game_date_db():
 def advance_game_day(current_date):
     return current_date + relativedelta(days=1)
 
+
+
 def handle_promotion_relegation():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # --- Compute table for League 1 (bottom 3) ---
+    last_season = get_last_season(conn)
+
+    # --- Bottom 3 from League 1 ---
     cur.execute("""
-        SELECT c.id, c.name,
-               COALESCE(SUM(CASE
-                       WHEN f.home_club_id = c.id AND f.home_goals > f.away_goals THEN 3
-                       WHEN f.away_club_id = c.id AND f.away_goals > f.home_goals THEN 3
-                       WHEN f.home_goals = f.away_goals AND (f.home_club_id = c.id OR f.away_club_id = c.id) THEN 1
-                       ELSE 0 END), 0) as points,
-               COALESCE(SUM(CASE WHEN f.home_club_id = c.id THEN f.home_goals ELSE f.away_goals END), 0) as goals_for,
-               COALESCE(SUM(CASE WHEN f.home_club_id = c.id THEN f.away_goals ELSE f.home_goals END), 0) as goals_against
-        FROM clubs c
-        LEFT JOIN fixtures f ON (f.home_club_id = c.id OR f.away_club_id = c.id)
-        WHERE c.league_id = 1
-        GROUP BY c.id
-        ORDER BY points ASC, (goals_for - goals_against) ASC
-        LIMIT 3
-    """)
+        WITH season_matches AS (
+            SELECT home_club_id, away_club_id, home_goals, away_goals, competition_id, season
+            FROM fixtures
+            WHERE competition_id = 1 AND played = 1
+        ),
+        club_stats AS (
+            SELECT
+                c.id AS club_id,
+                sm.season,
+                SUM(CASE 
+                        WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 1
+                        WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 1
+                        ELSE 0 END) AS wins,
+                SUM(CASE 
+                        WHEN sm.home_goals = sm.away_goals 
+                             AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
+                        ELSE 0 END) AS draws,
+                SUM(CASE 
+                        WHEN sm.home_club_id = c.id AND sm.home_goals < sm.away_goals THEN 1
+                        WHEN sm.away_club_id = c.id AND sm.away_goals < sm.home_goals THEN 1
+                        ELSE 0 END) AS losses,
+                SUM(CASE 
+                        WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 3
+                        WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 3
+                        WHEN sm.home_goals = sm.away_goals 
+                             AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
+                        ELSE 0 END) AS points,
+                SUM(CASE WHEN sm.home_club_id = c.id THEN sm.home_goals 
+                         WHEN sm.away_club_id = c.id THEN sm.away_goals ELSE 0 END) AS goals_for,
+                SUM(CASE WHEN sm.home_club_id = c.id THEN sm.away_goals 
+                         WHEN sm.away_club_id = c.id THEN sm.home_goals ELSE 0 END) AS goals_against
+            FROM clubs c
+            JOIN season_matches sm 
+              ON sm.home_club_id = c.id OR sm.away_club_id = c.id
+            GROUP BY c.id, sm.season
+        )
+        SELECT c.id, c.name, cs.points, cs.goals_for, cs.goals_against
+        FROM club_stats cs
+        JOIN clubs c ON c.id = cs.club_id
+        WHERE cs.season = ?
+        ORDER BY cs.points ASC, (cs.goals_for - cs.goals_against) ASC, cs.goals_for ASC, c.name
+        LIMIT 3;
+    """, (last_season,))
     relegated = cur.fetchall()
 
-    # --- Compute table for League 2 (top 3) ---
+    # --- Top 3 from League 2 ---
     cur.execute("""
-        SELECT c.id, c.name,
-               COALESCE(SUM(CASE
-                       WHEN f.home_club_id = c.id AND f.home_goals > f.away_goals THEN 3
-                       WHEN f.away_club_id = c.id AND f.away_goals > f.home_goals THEN 3
-                       WHEN f.home_goals = f.away_goals AND (f.home_club_id = c.id OR f.away_club_id = c.id) THEN 1
-                       ELSE 0 END), 0) as points,
-               COALESCE(SUM(CASE WHEN f.home_club_id = c.id THEN f.home_goals ELSE f.away_goals END), 0) as goals_for,
-               COALESCE(SUM(CASE WHEN f.home_club_id = c.id THEN f.away_goals ELSE f.home_goals END), 0) as goals_against
-        FROM clubs c
-        LEFT JOIN fixtures f ON (f.home_club_id = c.id OR f.away_club_id = c.id)
-        WHERE c.league_id = 2
-        GROUP BY c.id
-        ORDER BY points DESC, (goals_for - goals_against) DESC
-        LIMIT 3
-    """)
+        WITH season_matches AS (
+            SELECT home_club_id, away_club_id, home_goals, away_goals, competition_id, season
+            FROM fixtures
+            WHERE competition_id = 2 AND played = 1
+        ),
+        club_stats AS (
+            SELECT
+                c.id AS club_id,
+                sm.season,
+                SUM(CASE 
+                        WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 1
+                        WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 1
+                        ELSE 0 END) AS wins,
+                SUM(CASE 
+                        WHEN sm.home_goals = sm.away_goals 
+                             AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
+                        ELSE 0 END) AS draws,
+                SUM(CASE 
+                        WHEN sm.home_club_id = c.id AND sm.home_goals < sm.away_goals THEN 1
+                        WHEN sm.away_club_id = c.id AND sm.away_goals < sm.home_goals THEN 1
+                        ELSE 0 END) AS losses,
+                SUM(CASE 
+                        WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 3
+                        WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 3
+                        WHEN sm.home_goals = sm.away_goals 
+                             AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
+                        ELSE 0 END) AS points,
+                SUM(CASE WHEN sm.home_club_id = c.id THEN sm.home_goals 
+                         WHEN sm.away_club_id = c.id THEN sm.away_goals ELSE 0 END) AS goals_for,
+                SUM(CASE WHEN sm.home_club_id = c.id THEN sm.away_goals 
+                         WHEN sm.away_club_id = c.id THEN sm.home_goals ELSE 0 END) AS goals_against
+            FROM clubs c
+            JOIN season_matches sm 
+              ON sm.home_club_id = c.id OR sm.away_club_id = c.id
+            GROUP BY c.id, sm.season
+        )
+        SELECT c.id, c.name, cs.points, cs.goals_for, cs.goals_against
+        FROM club_stats cs
+        JOIN clubs c ON c.id = cs.club_id
+        WHERE cs.season = ?
+        ORDER BY cs.points DESC, (cs.goals_for - cs.goals_against) DESC, cs.goals_for DESC, c.name
+        LIMIT 3;
+    """, (last_season,))
     promoted = cur.fetchall()
 
     # --- Swap leagues ---
@@ -1794,11 +2154,22 @@ def handle_promotion_relegation():
 
     conn.commit()
     conn.close()
-    print("✅ Promotion/Relegation complete")
+    print(f"✅ Promotion/Relegation complete for season {last_season}")
+
+
+def get_last_season(conn):
+    """
+    Return the most recent finished season string, e.g. '2025/26'.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(season) FROM fixtures WHERE played = 1")
+    return cur.fetchone()[0]
+
 
 
 def game_loop():
     global GAME_DATE, LEAGUE_ATK_MEAN, LEAGUE_DEF_MEAN
+        
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -1807,74 +2178,141 @@ def game_loop():
         cur.execute("INSERT INTO global_val (var_name, value_date) VALUES (?, ?)", ("GAME_DATE", GAME_DATE.isoformat()))
         conn.commit()
 
-    print(f"Game started on {GAME_DATE}. Press Enter to tick a day, or Q to quit.")
+    print(f"Game started on {GAME_DATE}. Press Enter to tick a day, M for a month, Y for a year, or Q to quit.")
     while True:
-        user_input = input("Press Enter to advance (1 day), or Q to quit: ").strip().lower()
+        user_input = input("Press Enter (1 day), M (1 month), Y (1 year), or Q to quit: ").strip().lower()
         if user_input == "q":
             print("Quitting the game...")
             break
-
-        # Update variable day values
-        update_game_date_db()
-
-        # 🔹 Simulamos fixtures del día
-        simulate_fixtures_for_day(conn, GAME_DATE)
-
-        # 🔹 End of season reset (31 de agosto)
-        if GAME_DATE.month == 8 and GAME_DATE.day == 31:
-            handle_promotion_relegation()
-            print("📅 End of season! Resetting fixtures...")
-            #depopulate_fixtures()
-            populate_fixtures(1)
-            populate_fixtures(2)
-            cup_manage(3)
-            #depopulate_match_scorers()
-            LEAGUE_ATK_MEAN = None
-            LEAGUE_DEF_MEAN = None
-            print("✅ New season fixtures generated!")
-            
-            # Contract renewal
-            renew_expired_contracts(conn, GAME_DATE)
-
-        # 🔹 Cup progression (solo los viernes)
-        if GAME_DATE.weekday() == 4:  # viernes
-            cup_manage(3)
-        #     cur.execute("""
-        #         SELECT MIN(competition_round)
-        #         FROM fixtures
-        #         WHERE competition_id=3 AND played=0
-        #     """)
-        #     row = cur.fetchone()
-        #     current_round = row[0] if row and row[0] is not None else 0
-
-        #     winners = resolve_cup_round(conn, 3, current_round)
-        #     if winners:
-        #         advance_cup_round(conn, 3, GAME_DATE + timedelta(days=14), current_round, winners)
-
-        # Finances updating
-        if GAME_DATE.day == 1:  # viernes
-            process_monthly_finances(conn, GAME_DATE)
+        elif user_input == "m":
+            start_date = GAME_DATE
+            end_date = advance_game_month(GAME_DATE)
+            while GAME_DATE < end_date:
             
 
+                update_game_date_db()
+                
+                # Every day we run the decision making for each club
+                decision_making.decision_making_func(GAME_DATE)
+                
+                
+                simulate_fixtures_for_day(conn, GAME_DATE)
+                if GAME_DATE.month == 8 and GAME_DATE.day == 31:
+                    
+                    # Screenshot of the tables once a year
+                    for table in SNAPSHOT_TABLES:
+                        snapshot_table(table, GAME_DATE)
+                    
+                    handle_promotion_relegation()
+                    print("📅 End of season! Resetting fixtures...")
+                    populate_fixtures(1)
+                    populate_fixtures(2)
+                    cup_manage(3)
+                    LEAGUE_ATK_MEAN = None
+                    LEAGUE_DEF_MEAN = None
+                    print("✅ New season fixtures generated!")
+                    
+                    renew_expired_contracts(conn, GAME_DATE)        # players
+                    renew_expired_staff_contracts(conn, GAME_DATE)  # staff
+                    
+                if GAME_DATE.weekday() == 4:
+                    cup_manage(3)
+                if GAME_DATE.day == 1:
+                    process_monthly_finances(conn, GAME_DATE)
+                GAME_DATE = advance_game_day(GAME_DATE)
+                cur.execute("UPDATE global_val SET value_date=? WHERE var_name='GAME_DATE'", (GAME_DATE.isoformat(),))
+                conn.commit()
+                if GAME_DATE.weekday() == 0:
+                    update_players_in_db(conn, GAME_DATE)
+                    update_staff_in_db(conn, GAME_DATE)
+                print(f"Game Date: {GAME_DATE}")
+        elif user_input == "y":
+            start_date = GAME_DATE
+            end_date = advance_game_year(GAME_DATE)
+            while GAME_DATE < end_date:
+                # ...same daily simulation as above...
+                
+                # Every day we run the decision making for each club
+                decision_making.decision_making_func(GAME_DATE)
+                
+                update_game_date_db()
+                
+                # Every day we run the decision making for each club
+                decision_making.decision_making_func(GAME_DATE)
+                
+                simulate_fixtures_for_day(conn, GAME_DATE)
+                if GAME_DATE.month == 8 and GAME_DATE.day == 31:
+                    
+                    # Screenshot of the tables once a year
+                    for table in SNAPSHOT_TABLES:
+                        snapshot_table(table, GAME_DATE)
+                    
+                    handle_promotion_relegation()
+                    print("📅 End of season! Resetting fixtures...")
+                    populate_fixtures(1)
+                    populate_fixtures(2)
+                    cup_manage(3)
+                    LEAGUE_ATK_MEAN = None
+                    LEAGUE_DEF_MEAN = None
+                    print("✅ New season fixtures generated!")
+                    
+                    renew_expired_contracts(conn, GAME_DATE)        # players
+                    renew_expired_staff_contracts(conn, GAME_DATE)  # staff
+                    
+                if GAME_DATE.weekday() == 4:
+                    cup_manage(3)
+                if GAME_DATE.day == 1:
+                    process_monthly_finances(conn, GAME_DATE)
+                GAME_DATE = advance_game_day(GAME_DATE)
+                cur.execute("UPDATE global_val SET value_date=? WHERE var_name='GAME_DATE'", (GAME_DATE.isoformat(),))
+                conn.commit()
+                if GAME_DATE.weekday() == 0:
+                    update_players_in_db(conn, GAME_DATE)
+                    update_staff_in_db(conn, GAME_DATE)
+                print(f"Game Date: {GAME_DATE}")
+        else:
+            update_game_date_db()
             
+            # Every day we run the decision making for each club
+            decision_making.decision_making_func(GAME_DATE)
+            
+            simulate_fixtures_for_day(conn, GAME_DATE)
+            if GAME_DATE.month == 8 and GAME_DATE.day == 31:
+                
+                # Screenshot of the tables once a year
+                for table in SNAPSHOT_TABLES:
+                    snapshot_table(table, GAME_DATE)
+                
+                handle_promotion_relegation()
+                print("📅 End of season! Resetting fixtures...")
+                populate_fixtures(1)
+                populate_fixtures(2)
+                cup_manage(3)
+                LEAGUE_ATK_MEAN = None
+                LEAGUE_DEF_MEAN = None
+                print("✅ New season fixtures generated!")
+                
+                renew_expired_contracts(conn, GAME_DATE)        # players
+                renew_expired_staff_contracts(conn, GAME_DATE)  # staff
+                
+            if GAME_DATE.weekday() == 4:
+                cup_manage(3)
+            if GAME_DATE.day == 1:
+                process_monthly_finances(conn, GAME_DATE)
+            GAME_DATE = advance_game_day(GAME_DATE)
+            cur.execute("UPDATE global_val SET value_date=? WHERE var_name='GAME_DATE'", (GAME_DATE.isoformat(),))
+            conn.commit()
+            if GAME_DATE.weekday() == 0:
+                update_players_in_db(conn, GAME_DATE)
+                update_staff_in_db(conn, GAME_DATE)
+            print(f"Game Date: {GAME_DATE}")
 
-
-        # 🔹 Avanzamos un día
-        GAME_DATE = advance_game_day(GAME_DATE)
-        cur.execute("UPDATE global_val SET value_date=? WHERE var_name='GAME_DATE'", (GAME_DATE.isoformat(),))
-        conn.commit()
-        
-        
-        
-        
-
-        # 🔹 Weekly updates (lunes)
-        if GAME_DATE.weekday() == 0:
-            update_players_in_db(conn, GAME_DATE)
-
-        print(f"Game Date: {GAME_DATE}")
 
     conn.close()
+
+
+
+
 
 def populate_all_players():
     conn = sqlite3.connect(DB_PATH)
@@ -1899,16 +2337,37 @@ def populate_all_players():
             for pos, count in position_counts.items():
                 for _ in range(count):
                     p, a, c = generate_player(position=pos, club_id=club_id, club_fame=club_fame)
-                    # make sure date is ISO string for sqlite
-                    p = list(p)
+
+                    # Calculate fame & peak_fame
+                    age = calculate_age(p[2], GAME_DATE)
+                    curr_ability = a[-2]
+                    fame = calculate_player_fame(age, curr_ability, club_fame)
+
+                    # Ensure date is ISO string
                     if isinstance(p[2], dt.date):
-                        p[2] = p[2].isoformat()
-                    players.append(tuple(p))
+                        dob = p[2].isoformat()
+                    else:
+                        dob = p[2]
+
+                    # p structure: (first_name, last_name, date_of_birth, nationality, position, club_id, value)
+                    players.append((
+                        p[0],        # first_name
+                        p[1],        # last_name
+                        dob,         # date_of_birth
+                        p[3],        # nationality
+                        None,        # second_nationality (not used yet)
+                        p[4],        # position
+                        p[5],        # club_id
+                        p[6],        # value
+                        fame,        # fame
+                        fame         # peak_fame
+                    ))
                     attrs.append(a)
                     contracts.append(c)
 
         return players, attrs, contracts
 
+    # --- League players
     players1, attrs1, contracts1 = create_players_for_league(1)
     players2, attrs2, contracts2 = create_players_for_league(2)
 
@@ -1924,16 +2383,16 @@ def populate_all_players():
     # Insert players
     cur.executemany("""
         INSERT INTO players (
-            first_name, last_name, date_of_birth, nationality,
-            position, club_id, value
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            first_name, last_name, date_of_birth, nationality, second_nationality,
+            position, club_id, value, fame, peak_fame
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, players)
 
     last_rowid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
     start_id = last_rowid - len(players) + 1
     player_ids = list(range(start_id, start_id + len(players)))
 
-    # Insert attributes
+    # Attributes
     players_attr_with_ids = [(pid, *attr) for pid, attr in zip(player_ids, attrs)]
     cur.executemany("""
         INSERT INTO players_attr (
@@ -1946,7 +2405,7 @@ def populate_all_players():
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, players_attr_with_ids)
 
-    # Insert contracts
+    # Contracts
     players_contracts_with_ids = [(pid, *c) for pid, c in zip(player_ids, contracts)]
     cur.executemany("""
         INSERT INTO players_contract (
@@ -1954,11 +2413,59 @@ def populate_all_players():
         ) VALUES (?, ?, ?, ?, ?, ?)
     """, players_contracts_with_ids)
 
+    print(f"✅ {len(players)} league players generated with contracts")
+
+    # --- Free agent pool (50 players)
+    free_players, free_attrs, free_contracts = [], [], []
+    for _ in range(50):
+        p, a, c = generate_player(position=None, club_id=None, club_fame=1000)
+        age = calculate_age(p[2], GAME_DATE)
+        curr_ability = a[-2]
+        fame = calculate_player_fame(age, curr_ability, 1000)
+
+        dob = p[2].isoformat() if isinstance(p[2], dt.date) else p[2]
+
+        free_players.append((
+            p[0],   # first_name
+            p[1],   # last_name
+            dob,    # date_of_birth
+            p[3],   # nationality
+            None,   # second_nationality
+            p[4],   # position
+            None,   # no club
+            p[6],   # value
+            fame,
+            fame
+        ))
+        free_attrs.append(a)
+        free_contracts.append((None, "Unemployed", GAME_DATE.isoformat(), None, 0))
+
+    cur.executemany("""
+        INSERT INTO players (
+            first_name, last_name, date_of_birth, nationality, second_nationality,
+            position, club_id, value, fame, peak_fame
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, free_players)
+
+    last_rowid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
+    start_id = last_rowid - len(free_players) + 1
+    free_ids = list(range(start_id, start_id + len(free_players)))
+
+    # Attributes
+    players_attr_with_ids = [(pid, *attr) for pid, attr in zip(free_ids, free_attrs)]
+    cur.executemany("""
+        INSERT INTO players_attr (
+            player_id, at_luck, at_selfcont, at_honour, at_crazyness, at_working,
+            at_sexatract, at_friendship, at_speed, at_dribbling,
+            at_goalkeeping, at_defending, at_passing, at_scoring,
+            at_happiness, at_confidence, at_hope,
+            at_curr_ability, at_pot_ability
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, players_attr_with_ids)
+
     conn.commit()
     conn.close()
-    print(f"✅ {len(players)} players generated with contracts")
-
-
+    print(f"✅ {len(free_players)} free agent players generated")
 
 
 def populate_competition_clubs():
@@ -2302,11 +2809,12 @@ def cup_manage(competition_id: int):
 
 
 
+
 def populate_staff():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # Get clubs with fame & competition country
+    # --- Clubs ---
     cur.execute("""
         SELECT c.id, c.fame, co.country
         FROM clubs c
@@ -2319,87 +2827,68 @@ def populate_staff():
         conn.close()
         return
 
-    # Roles setup: we expand with 3 Coaches
     base_roles = ["Manager", "Assistant Coach", "Physio", "Medical", "Scout"]
+
     staff_insert, contracts_insert, attrs_insert = [], [], []
 
+    # --- Staff per club ---
     for club_id, club_fame, club_country in clubs:
-        roles = base_roles + ["Coach"] * 3  # add 3 coaches per club
+        roles = base_roles + ["Goalkeeping Coach"] + ["Coach"] * 2
 
         for role in roles:
             faker = Faker()
             first_name = faker.first_name_male()
             last_name = faker.last_name()
 
-            # Nationality (90% local, 10% foreign like players)
-            if random.random() < 0.9:
-                nationality = club_country
-            else:
-                nationality = random.choice(
-                    ["England", "Argentina", "Spain", "Germany",
-                     "Netherlands", "France", "Italy"]
-                )
-
-            # Rare second nationality (10%)
+            # Nationality (90% local, 10% foreign)
+            nationality = club_country if random.random() < 0.9 else random.choice(
+                ["England", "Argentina", "Spain", "Germany", "Netherlands", "France", "Italy"]
+            )
             second_nationality = faker.country() if random.random() < 0.1 else None
 
-            # Age
-            age = random.randint(30, 65)
-            birth_year = GAME_DATE.year - age
-            birth_month = random.randint(1, 12)
-            birth_day = random.randint(1, 28)
-            date_of_birth = date(birth_year, birth_month, birth_day)
+            # Age 30–55 (younger than before so they don’t all retire early)
+            age = random.randint(30, 55)
+            date_of_birth = date(GAME_DATE.year - age,
+                                 random.randint(1, 12),
+                                 random.randint(1, 28))
 
-            # --- Staff record ---
-            staff_insert.append(
-                (first_name, last_name, date_of_birth.isoformat(),
-                 nationality, second_nationality, role, club_id)
-            )
+            staff_fame = calculate_staff_fame(age, club_fame, role)
 
-            # --- Contract (Sept 1 – Aug 31) ---
+            staff_insert.append((
+                first_name, last_name, date_of_birth.isoformat(),
+                nationality, second_nationality, role, staff_fame, club_id
+            ))
+
+            # Contract (Sept 1 – Aug 31)
             start_year = GAME_DATE.year - random.randint(0, 2)
             contract_start = date(start_year, 9, 1)
             end_year = GAME_DATE.year + random.randint(1, 3)
             contract_end = date(end_year, 8, 31)
 
-            # Wage logic
-            if role == "Physio":
-                wage = random.randint(50_000, 200_000)
-            elif role == "Medical":
-                wage = random.randint(80_000, 250_000)
-            elif role == "Scout":
-                wage = random.randint(100_000, 400_000)
-            elif role == "Assistant Coach":
-                wage = random.randint(200_000, 600_000)
-            elif role == "Coach":
-                wage = random.randint(150_000, 500_000)
-            elif role == "Manager":
-                fame_factor = (club_fame / 2000.0)  # ~0.5 → 2.0
-                wage = int(random.randint(500_000, 2_000_000) * fame_factor)
-            else:
-                wage = random.randint(50_000, 300_000)
+            wage = random.randint(150_000, 600_000) if role in ("Assistant Coach", "Coach") else \
+                   random.randint(500_000, 2_000_000) if role == "Manager" else \
+                   random.randint(80_000, 400_000)
 
-            contracts_insert.append(
-                (club_id, "Professional", contract_start.isoformat(),
-                 contract_end.isoformat(), wage)
-            )
+            contracts_insert.append((
+                club_id, "Professional",
+                contract_start.isoformat(), contract_end.isoformat(), wage
+            ))
 
-            # --- Attributes (1–2000) ---
             attrs_insert.append(generate_staff_attributes(role))
 
     # --- Insert staff ---
     cur.executemany("""
         INSERT INTO staff (
             first_name, last_name, date_of_birth, nationality, second_nationality,
-            role, club_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            role, fame, club_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, staff_insert)
 
     last_rowid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
     start_id = last_rowid - len(staff_insert) + 1
     staff_ids = list(range(start_id, start_id + len(staff_insert)))
 
-    # --- Insert contracts ---
+    # Contracts
     contracts_with_ids = [(sid, *c) for sid, c in zip(staff_ids, contracts_insert)]
     cur.executemany("""
         INSERT INTO staff_contract (
@@ -2407,86 +2896,162 @@ def populate_staff():
         ) VALUES (?, ?, ?, ?, ?, ?)
     """, contracts_with_ids)
 
-    # --- Insert attributes ---
+    # Attributes
     attrs_with_ids = [(sid, *a) for sid, a in zip(staff_ids, attrs_insert)]
     cur.executemany("""
         INSERT INTO staff_attr (
             staff_id, at_goalkeeping, at_tackling, at_passing,
-            at_shooting, at_physio, at_medical, at_scouting
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            at_shooting, at_physio, at_medical, at_scouting,
+            at_curr_ability, at_pot_ability
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, attrs_with_ids)
+
+    print(f"✅ {len(staff_insert)} staff generated for clubs")
+
+    # --- Free agent staff pool (50) ---
+    free_staff_insert, free_contracts_insert, free_attrs_insert = [], [], []
+    roles_pool = ["Manager", "Assistant Coach", "Goalkeeping Coach", "Coach", "Physio", "Medical", "Scout"]
+
+    for _ in range(50):
+        role = random.choice(roles_pool)
+        faker = Faker()
+        first_name = faker.first_name_male()
+        last_name = faker.last_name()
+
+        nationality = faker.country()
+        second_nationality = faker.country() if random.random() < 0.1 else None
+
+        age = random.randint(28, 55)
+        date_of_birth = date(GAME_DATE.year - age,
+                             random.randint(1, 12),
+                             random.randint(1, 28))
+
+        staff_fame = random.randint(100, 800)
+
+        free_staff_insert.append((
+            first_name, last_name, date_of_birth.isoformat(),
+            nationality, second_nationality, role, staff_fame, None   # club_id = NULL
+        ))
+
+        free_contracts_insert.append((
+            None, "Unemployed",
+            GAME_DATE.isoformat(), None, 0
+        ))
+
+        free_attrs_insert.append(generate_staff_attributes(role))
+
+    cur.executemany("""
+        INSERT INTO staff (
+            first_name, last_name, date_of_birth, nationality, second_nationality,
+            role, fame, club_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, free_staff_insert)
+
+    last_rowid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
+    start_id = last_rowid - len(free_staff_insert) + 1
+    free_staff_ids = list(range(start_id, start_id + len(free_staff_insert)))
+
+
+    # Attributes
+    free_attrs_with_ids = [(sid, *a) for sid, a in zip(free_staff_ids, free_attrs_insert)]
+    cur.executemany("""
+        INSERT INTO staff_attr (
+            staff_id, at_goalkeeping, at_tackling, at_passing,
+            at_shooting, at_physio, at_medical, at_scouting,
+            at_curr_ability, at_pot_ability
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, free_attrs_with_ids)
 
     conn.commit()
     conn.close()
-    print(f"✅ {len(staff_insert)} staff generated with contracts and attributes")
+    print(f"✅ {len(free_staff_insert)} free agent staff generated")
 
-def generate_staff_attributes(role: str):
-    def rand(low, high): return random.randint(low, high)
+
+
+
+def generate_staff_attributes(role):
+    """
+    Generate realistic staff attributes (0–2000 scale),
+    with role-specific strengths and higher potentials.
+    """
+    # Base scale
+    #curr_ability = random.randint(800, 1400)
+    #pot_ability = min(2000, curr_ability + random.randint(400, 900))
+    
+    base = random.randint(750, 1250)
+    curr_ability = max(700, base + random.randint(-100, 150))
+    pot_ability  = min(2000, curr_ability + random.randint(300, 700))
 
     if role == "Manager":
-        return (
-            rand(800, 1600),  # goalkeeping
-            rand(800, 1600),  # tackling
-            rand(1000, 1800), # passing
-            rand(800, 1600),  # shooting
-            rand(200, 800),   # physio
-            rand(200, 800),   # medical
-            rand(1000, 2000)  # scouting
-        )
+        at_goalkeeping = random.randint(200, 600)
+        at_tackling = random.randint(800, 1400)
+        at_passing = random.randint(800, 1400)
+        at_shooting = random.randint(500, 1000)
+        at_physio = random.randint(300, 700)
+        at_medical = random.randint(300, 700)
+        at_scouting = random.randint(900, 1600)
     elif role == "Assistant Coach":
-        return (
-            rand(600, 1500),
-            rand(600, 1500),
-            rand(800, 1600),
-            rand(600, 1500),
-            rand(200, 600),
-            rand(200, 600),
-            rand(800, 1600)
-        )
+        at_goalkeeping = random.randint(200, 700)
+        at_tackling = random.randint(700, 1200)
+        at_passing = random.randint(700, 1200)
+        at_shooting = random.randint(500, 1000)
+        at_physio = random.randint(300, 800)
+        at_medical = random.randint(300, 800)
+        at_scouting = random.randint(700, 1200)
     elif role == "Coach":
-        return (
-            rand(1000, 2000),
-            rand(1000, 2000),
-            rand(1000, 2000),
-            rand(1000, 2000),
-            rand(200, 600),
-            rand(200, 600),
-            rand(200, 800)
-        )
-    elif role == "Physio":
-        return (
-            rand(200, 600),
-            rand(200, 600),
-            rand(200, 600),
-            rand(200, 600),
-            rand(1200, 2000),  # physio very high
-            rand(200, 600),
-            rand(200, 600)
-        )
-    elif role == "Medical":
-        return (
-            rand(200, 600),
-            rand(200, 600),
-            rand(200, 600),
-            rand(200, 600),
-            rand(200, 600),
-            rand(1200, 2000),  # medical very high
-            rand(200, 600)
-        )
+        at_goalkeeping = random.randint(300, 1000)
+        at_tackling = random.randint(600, 1200)
+        at_passing = random.randint(600, 1200)
+        at_shooting = random.randint(600, 1200)
+        at_physio = random.randint(300, 700)
+        at_medical = random.randint(300, 700)
+        at_scouting = random.randint(500, 1000)
     elif role == "Scout":
-        return (
-            rand(200, 600),
-            rand(200, 600),
-            rand(400, 1200),
-            rand(200, 600),
-            rand(200, 600),
-            rand(200, 600),
-            rand(1200, 2000)  # scouting very high
-        )
-    else:
-        # generic fallback
-        return tuple(rand(200, 2000) for _ in range(7))
-
+        at_goalkeeping = random.randint(100, 400)
+        at_tackling = random.randint(200, 600)
+        at_passing = random.randint(200, 600)
+        at_shooting = random.randint(200, 600)
+        at_physio = random.randint(200, 600)
+        at_medical = random.randint(200, 600)
+        at_scouting = random.randint(1000, 1800)  # ⭐ Scouts excel
+    elif role == "Physio":
+        at_goalkeeping = random.randint(100, 400)
+        at_tackling = random.randint(100, 400)
+        at_passing = random.randint(100, 400)
+        at_shooting = random.randint(100, 400)
+        at_physio = random.randint(1000, 1800)   # ⭐ Physio focus
+        at_medical = random.randint(700, 1400)
+        at_scouting = random.randint(200, 700)
+    elif role == "Medical":
+        at_goalkeeping = random.randint(100, 400)
+        at_tackling = random.randint(100, 400)
+        at_passing = random.randint(100, 400)
+        at_shooting = random.randint(100, 400)
+        at_physio = random.randint(700, 1400)
+        at_medical = random.randint(1000, 1800)  # ⭐ Medical focus
+        at_scouting = random.randint(200, 700)
+    elif role == "Goalkeeping Coach":
+        at_goalkeeping = random.randint(1200, 1800)   # ⭐ Specialization
+        at_tackling    = random.randint(300, 800)
+        at_passing     = random.randint(300, 800)
+        at_shooting    = random.randint(300, 800)
+        at_physio      = random.randint(300, 700)
+        at_medical     = random.randint(300, 700)
+        at_scouting    = random.randint(200, 600)
+    else:  # fallback
+        at_goalkeeping = random.randint(200, 800)
+        at_tackling = random.randint(200, 800)
+        at_passing = random.randint(200, 800)
+        at_shooting = random.randint(200, 800)
+        at_physio = random.randint(200, 800)
+        at_medical = random.randint(200, 800)
+        at_scouting = random.randint(200, 800)
+        
+    return (
+        at_goalkeeping, at_tackling, at_passing, at_shooting,
+        at_physio, at_medical, at_scouting,
+        curr_ability, pot_ability
+    )
 
 
 def compute_staff_multipliers(cur, club_id):
@@ -2520,7 +3085,78 @@ def compute_staff_multipliers(cur, club_id):
         "fitness": scale((physio + medical) / 2),
     }
 
+def advance_game_month(current_date):
+    # Advance to the same day next month, or last day if not possible
+    try:
+        return current_date + relativedelta(months=1)
+    except Exception:
+        # fallback: go to last day of next month
+        next_month = current_date.month % 12 + 1
+        year = current_date.year + (current_date.month // 12)
+        last_day = (date(year, next_month % 12 + 1, 1) - timedelta(days=1)).day
+        return date(year, next_month, last_day)
 
+
+def advance_game_year(current_date):
+    # Advance to the same day next year, or last day if not possible
+    try:
+        return current_date + relativedelta(years=1)
+    except Exception:
+        # fallback: go to last day of next year
+        year = current_date.year + 1
+        month = current_date.month
+        last_day = (date(year, month % 12 + 1, 1) - timedelta(days=1)).day
+        return date(year, month, last_day)
+
+
+def create_histo_table(base_table, db_path=DB_PATH):
+    """
+    Create a _histo table with same columns as base_table
+    plus screenshot_day DATE. Drops existing only at game start.
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    histo_table = f"{base_table}_histo"
+    cur.execute(f"DROP TABLE IF EXISTS {histo_table}")
+
+    # Copy column definitions
+    cur.execute(f"PRAGMA table_info({base_table})")
+    col_defs = [f"{row[1]} {row[2]}" for row in cur.fetchall()]
+    col_defs.append("screenshot_day DATE")
+
+    ddl = f"CREATE TABLE {histo_table} ({', '.join(col_defs)})"
+    cur.execute(ddl)
+
+    conn.commit()
+    conn.close()
+
+
+def snapshot_table(base_table, game_date, db_path=DB_PATH):
+    """
+    Append rows from base_table into base_table_histo
+    with GAME_DATE stamped into screenshot_day.
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    histo_table = f"{base_table}_histo"
+
+    # Get column names dynamically
+    cur.execute(f"PRAGMA table_info({base_table})")
+    cols = [row[1] for row in cur.fetchall()]
+    col_list = ", ".join(cols)
+
+    cur.execute(f"SELECT {col_list} FROM {base_table}")
+    rows = cur.fetchall()
+    rows_with_date = [tuple(row) + (game_date,) for row in rows]
+
+    placeholders = ", ".join(["?"] * (len(cols) + 1))
+    insert_sql = f"INSERT INTO {histo_table} ({col_list}, screenshot_day) VALUES ({placeholders})"
+    cur.executemany(insert_sql, rows_with_date)
+
+    conn.commit()
+    conn.close()
 
 
 # -----------------------------
@@ -2564,6 +3200,15 @@ if __name__ == "__main__":
     # init_db_possib()
     # clean_player_situ()
     # run_game(16)
+    
+    
+    # Create historical tables
+    for table in SNAPSHOT_TABLES:
+        create_histo_table(table)   # reset fresh
+        snapshot_table(table, GAME_DATE)  # first snapshot
+    
+
+    
 
     # Kick off loop
     game_loop()
