@@ -11,16 +11,27 @@ from faker import Faker
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 import datetime as dt
+import sys
 
 import decision_making
-from decision_making import adjust_board_satisfaction,season_end_board_adjustments
+from decision_making import adjust_board_satisfaction,season_end_board_adjustments, board_satisfaction_and_firing
 
-from db_population import init_db, generate_player, populate_all_players, distribute_attributes, calculate_player_fame
+
+
+from db_population import (
+    init_db,
+    generate_player,
+    populate_all_players,
+    distribute_attributes,
+    calculate_player_fame,
+    gen_logs_insert, player_stats_summary_func, random_positions_and_foot, top_up_free_agents
+)
+
 from fixture_calculation import simulate_fixtures_for_day
 
 LEAGUE_DEBUGGING = False
 CUP_DEBUGGING = False
-
+SNAPSHOT_TABLES_ACTIVE = False
 
 # -----------------------------
 # Paths & SQLite 3.12 adapters
@@ -82,8 +93,213 @@ FORMATIONS = [
 
 
 # -----------------------------
-# DB schema
+# Human club selection helpers
 # -----------------------------
+HUMAN_CLUB_ID = None  # set after selection / load
+
+
+# ------------- global_val helpers -------------
+def set_global_val(conn, var_name: str, *, value_int=None, value_text=None, value_date=None):
+    """
+    Upsert into global_val by var_name (table uses var_id PK, so we emulate upsert).
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT var_id FROM global_val WHERE var_name = ?", (var_name,))
+    row = cur.fetchone()
+    if row:
+        cur.execute("""
+            UPDATE global_val
+               SET value_int = ?,
+                   value_text = ?,
+                   value_date = ?
+             WHERE var_name = ?
+        """, (value_int, value_text, value_date, var_name))
+    else:
+        cur.execute("""
+            INSERT INTO global_val (var_name, value_int, value_text, value_date)
+            VALUES (?, ?, ?, ?)
+        """, (var_name, value_int, value_text, value_date))
+    conn.commit()
+
+def get_global_val_int(conn, var_name: str, default=None):
+    cur = conn.cursor()
+    cur.execute("SELECT value_int FROM global_val WHERE var_name = ?", (var_name,))
+    row = cur.fetchone()
+    return row[0] if row and row[0] is not None else default
+
+def get_global_val_text(conn, var_name: str, default=None):
+    cur = conn.cursor()
+    cur.execute("SELECT value_text FROM global_val WHERE var_name = ?", (var_name,))
+    row = cur.fetchone()
+    return row[0] if row and row[0] is not None else default
+
+
+def ensure_meta_table(conn):
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    conn.commit()
+
+def set_meta(conn, key, value):
+    ensure_meta_table(conn)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO meta(key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """, (key, str(value)))
+    conn.commit()
+
+def get_meta(conn, key, default=None):
+    ensure_meta_table(conn)
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM meta WHERE key = ?", (key,))
+    row = cur.fetchone()
+    return row[0] if row else default
+
+# ---------- League-only competition fetch ----------
+def _table_exists(conn, name: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (name,))
+    return cur.fetchone() is not None
+
+def _columns(conn, table: str) -> set:
+    cur = conn.cursor()
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        return {row[1] for row in cur.fetchall()}
+    except sqlite3.OperationalError:
+        return set()
+
+def fetch_leagues(conn):
+    return fetch_league_competitions(conn)
+
+# ---------- Clubs for a given league (primary path: clubs.league_id; fallback: clubs_competition) ----------
+def fetch_clubs_for_league(conn, league_id: int):
+    cur = conn.cursor()
+    # Primary: direct league assignment on clubs
+    cur.execute("""
+        SELECT id, name
+        FROM clubs
+        WHERE league_id = ?
+        ORDER BY name COLLATE NOCASE
+    """, (league_id,))
+    rows = cur.fetchall()
+    if rows:
+        return rows
+    # Fallback: clubs_competition mapping
+    cur.execute("""
+        SELECT c.id, c.name
+        FROM clubs_competition cc
+        JOIN clubs c ON c.id = cc.club_id
+        WHERE cc.competition_id = ?
+          AND COALESCE(cc.is_active, 1) = 1
+        ORDER BY c.name COLLATE NOCASE
+    """, (league_id,))
+    return cur.fetchall()
+
+
+def prompt_index(max_idx, allow_back=False, allow_quit=False):
+    while True:
+        raw = input("> ").strip().lower()
+        if allow_back and raw == 'b': return ('back', None)
+        if allow_quit and raw == 'q': return ('quit', None)
+        if raw.isdigit():
+            n = int(raw)
+            if 1 <= n <= max_idx:
+                return ('ok', n)
+        print(f"Enter 1..{max_idx}"
+              + ("; 'b' to go back" if allow_back else "")
+              + ("; 'q' to quit" if allow_quit else "") + ".")
+        
+        
+def load_human_club_from_globals(conn):
+    global HUMAN_CLUB_ID
+    cid = get_global_val_int(conn, "human_club_id", None)
+    if cid is not None:
+        HUMAN_CLUB_ID = int(cid)
+    return HUMAN_CLUB_ID
+        
+def choose_human_club(conn):
+    """
+    1) show leagues (league-only) → pick
+    2) show clubs in that league → pick
+    3) save to global_val:
+         - human_club_id   (value_int)
+    """
+    global HUMAN_CLUB_ID
+
+    leagues = fetch_league_competitions(conn)
+    if not leagues:
+        print("No league competitions found.")
+        return None
+
+    while True:
+        print("\nSelect a League (number). 'q' to quit.")
+        for i, (lid, lname) in enumerate(leagues, start=1):
+            print(f"  {i}. {lname} (id={lid})")
+        status, idx = prompt_index(len(leagues), allow_back=False, allow_quit=True)
+        if status == 'quit':
+            return None
+
+        league_id, league_name = leagues[idx-1]
+        clubs = fetch_clubs_for_league(conn, league_id)
+        if not clubs:
+            print("No clubs found in this league. Pick another league.")
+            continue
+
+        while True:
+            print(f"\nLeague: {league_name}")
+            print("Select a Club (number). 'b' back; 'q' quit.")
+            for i, (cid, cname) in enumerate(clubs, start=1):
+                print(f"  {i}. {cname} (id={cid})")
+            status2, idx2 = prompt_index(len(clubs), allow_back=True, allow_quit=True)
+            if status2 == 'back':
+                break
+            if status2 == 'quit':
+                return None
+
+            club_id, club_name = clubs[idx2-1]
+            print(f"\nYou will manage: {club_name} (id={club_id}) in {league_name}.")
+            if input("Confirm? (y/n): ").strip().lower() == 'y':
+                # Persist in global_val
+                set_global_val(conn, "human_club_id",   value_int=club_id)
+                HUMAN_CLUB_ID = club_id
+                print(f"Saved: human_club_id={club_id}, human_league_id={league_id}")
+                return club_id
+            # else loop to re-pick a club
+
+def load_human_club(conn):
+    """
+    Loads previously chosen club from meta (if any).
+    Sets HUMAN_CLUB_ID and returns it or None.
+    """
+    global HUMAN_CLUB_ID
+    val = get_meta(conn, "human_club_id", None)
+    if val is None:
+        return None
+    try:
+        HUMAN_CLUB_ID = int(val)
+        return HUMAN_CLUB_ID
+    except ValueError:
+        return None
+
+
+
+# ---------- League-only competition fetch (uses competitions.is_league) ----------
+def fetch_league_competitions(conn):
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name
+        FROM competitions
+        WHERE COALESCE(is_league, 0) = 1
+        ORDER BY COALESCE(level, 9999), name COLLATE NOCASE
+    """)
+    return cur.fetchall()
 
 
 # -----------------------------
@@ -357,6 +573,21 @@ def populate_clubs():
         for row in reader:
             rows.append((row['name'], row.get('short_name'), row.get('league_id'), row.get('stadium'), row.get('fame')))
     cur.executemany("INSERT INTO clubs (name, short_name, league_id, stadium, fame) VALUES (?, ?, ?, ?, ?)", rows)
+    
+    
+    
+    csv_path = os.path.join(BASE_DIR, "spanish_clubs.csv")
+    rows = []
+    with open(csv_path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append((row['name'], row.get('short_name'), row.get('league_id'), row.get('stadium'), row.get('fame')))
+    cur.executemany("INSERT INTO clubs (name, short_name, league_id, stadium, fame) VALUES (?, ?, ?, ?, ?)", rows)
+    
+    
+        
+    
+    
     conn.commit()
     conn.close()
     print("✅ Clubs populated")
@@ -677,12 +908,6 @@ def calculate_staff_fame(age, club_fame, role):
 
 
 
-
-
-
-
-
-
 def maybe_convert_to_staff(conn, player_id):
     cur = conn.cursor()
 
@@ -919,11 +1144,71 @@ def update_players_in_db(conn, game_date):
 
         age = calculate_age(birth_date, game_date)
 
-        # Retirement
-        if age > 35:
-            cur.execute("UPDATE players SET is_retired=1, value=0 WHERE id=?", (player_id,))
+        # Retirement at the end of the season only
+        if age > 34 and GAME_DATE.month == 8:
+            cur.execute("UPDATE players SET is_retired=1, value=0, club_id = null WHERE id=?", (player_id,))
             maybe_convert_to_staff(conn, player_id)
-            continue
+            
+                    
+        
+            # 3) Spawn regen: 50% same club, 50% free agent (no club)
+            same_club = (random.random() < 0.5)
+            regen_club_id = club_id if same_club else None
+        
+            # Keep pedigree in fame/value even if free: use former club's fame
+            row = cur.execute("SELECT fame FROM clubs WHERE id=?", (club_id,)).fetchone()
+            club_fame = row[0] if row else 1000
+        
+            youth, youth_attr, contract = generate_player(
+                GAME_DATE, fakers,
+                position=pos,
+                club_id=regen_club_id,     # None => free agent
+                club_fame=club_fame,
+                force_youth=True
+            )
+        
+            # players
+            cur.execute("""
+                INSERT INTO players (
+                    first_name, last_name, date_of_birth, nationality,
+                    position, club_id, value, fame, peak_fame
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, youth)
+            new_id = cur.lastrowid
+            
+            
+            # players_positions
+            positions, foot = random_positions_and_foot(pos)  # ← uses the primary 'pos' you passed to generate_player
+            for p in positions:
+                cur.execute("""
+                    INSERT OR IGNORE INTO players_positions (player_id, position, foot)
+                    VALUES (?, ?, ?)
+                """, (new_id, p, foot))
+
+        
+            # players_attr (incl. at_sexatract)
+            cur.execute("""
+                INSERT INTO players_attr (
+                    player_id,
+                    at_luck, at_selfcont, at_honour, at_crazyness, at_working,
+                    at_sexatract, at_friendship, at_speed, at_dribbling,
+                    at_goalkeeping, at_defending, at_passing, at_scoring,
+                    at_happiness, at_confidence, at_hope,
+                    at_curr_ability, at_pot_ability
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (new_id, *youth_attr))
+        
+            # players_contract only if the regen actually has a club
+            if contract[0] is not None:  # contract = (club_id, type, start, end, wage)
+                cur.execute("""
+                    INSERT INTO players_contract (
+                        player_id, club_id, contract_type, contract_start, contract_end, wage, is_terminated
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0)
+                """, (new_id, *contract))
+        
+            # done with this retired player
+            continue    
+
 
         # --- Base growth (slower) ---
         dev_gap = max(0, pot_ability - curr_ability)
@@ -1056,10 +1341,6 @@ def update_players_in_db(conn, game_date):
 
 
 
-
-
-
-
 # -----------------------------
 # Match simulation
 # -----------------------------
@@ -1067,12 +1348,6 @@ def get_club_fame(cur, club_id):
     cur.execute("SELECT fame FROM clubs WHERE id = ?", (club_id,))
     row = cur.fetchone()
     return row[0] if row else 1000
-
-
-
-
-
-
 
 
 
@@ -1238,120 +1513,324 @@ def advance_game_day(current_date):
 
 
 
+def ensure_league_links_schema(cur):
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS league_links (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        parent_league_id   INTEGER NOT NULL,
+        child_league_id    INTEGER NOT NULL,
+        promote_automatic  INTEGER NOT NULL DEFAULT 2,
+        promote_playoff    INTEGER NOT NULL DEFAULT 0,
+        relegate_automatic INTEGER NOT NULL DEFAULT 2,
+        relegate_playoff   INTEGER NOT NULL DEFAULT 0,
+        priority           INTEGER NOT NULL DEFAULT 1,
+        is_active          INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(parent_league_id, child_league_id)
+    )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS league_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        season TEXT NOT NULL,
+        ts DATE NOT NULL,
+        club_id INTEGER NOT NULL,
+        from_league_id INTEGER NOT NULL,
+        to_league_id   INTEGER NOT NULL,
+        reason TEXT
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_league_links_parent ON league_links(parent_league_id, is_active, priority)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_league_links_child  ON league_links(child_league_id,  is_active)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_movements_season    ON league_movements(season)")
+
+
+def get_sorted_table_for_league(cur, league_id: int):
+    """
+    Returns list of club_ids sorted by points DESC, goal_diff DESC, goals_for DESC.
+    Assumes competition_id == league_id for league fixtures.
+    """
+    cur.execute("""
+        SELECT c.id AS club_id,
+               COALESCE(SUM(
+                 CASE
+                   WHEN f.home_club_id=c.id AND f.home_goals>f.away_goals THEN 3
+                   WHEN f.away_club_id=c.id AND f.away_goals>f.home_goals THEN 3
+                   WHEN f.home_goals=f.away_goals AND (f.home_club_id=c.id OR f.away_club_id=c.id) THEN 1
+                   ELSE 0
+                 END
+               ),0) AS pts,
+               COALESCE(SUM(CASE WHEN f.home_club_id=c.id THEN f.home_goals ELSE f.away_goals END),0) AS gf,
+               COALESCE(SUM(CASE WHEN f.home_club_id=c.id THEN f.away_goals ELSE f.home_goals END),0) AS ga
+        FROM clubs c
+        LEFT JOIN fixtures f
+               ON (f.home_club_id=c.id OR f.away_club_id=c.id)
+              AND f.competition_id=?
+              AND f.played=1
+        WHERE c.league_id=?
+        GROUP BY c.id
+        ORDER BY pts DESC, (gf-ga) DESC, gf DESC, c.id ASC
+    """, (league_id, league_id))
+    return [r[0] for r in cur.fetchall()]
+
+
+def apply_promotions_and_relegations(conn, season_str: str, apply_date: date):
+    """
+    Generic engine driven by `league_links`. Moves clubs between leagues and logs to `league_movements`.
+    """
+    cur = conn.cursor()
+    from collections import defaultdict, deque
+
+    cur.execute("""
+        SELECT id, parent_league_id, child_league_id,
+               promote_automatic, promote_playoff,
+               relegate_automatic, relegate_playoff,
+               priority
+        FROM league_links
+        WHERE is_active=1
+        ORDER BY parent_league_id, priority ASC, id ASC
+    """)
+    links = cur.fetchall()
+
+    parent_groups = defaultdict(list)
+    for (link_id, parent_id, child_id, p_auto, p_po, r_auto, r_po, prio) in links:
+        parent_groups[parent_id].append(dict(
+            id=link_id, parent=parent_id, child=child_id,
+            promote_auto=p_auto, promote_po=p_po,
+            relegate_auto=r_auto, relegate_po=r_po,
+            priority=prio
+        ))
+
+    for parent_id, pipes in parent_groups.items():
+        pipes.sort(key=lambda x: (x["priority"], x["id"]))
+
+        parent_table = get_sorted_table_for_league(cur, parent_id)
+        total_auto_releg = min(sum(p["relegate_auto"] for p in pipes), len(parent_table))
+
+        relegated_auto = list(reversed(parent_table))[:total_auto_releg]  # bottom N
+
+        # Promote from each child
+        for pipe in pipes:
+            child_id = pipe["child"]
+            promote_auto = int(pipe["promote_auto"])
+
+            child_table = get_sorted_table_for_league(cur, child_id)
+            promote_auto = min(promote_auto, len(child_table))
+            promoted = child_table[:promote_auto]
+
+            for club_id in promoted:
+                cur.execute("UPDATE clubs SET league_id=? WHERE id=?", (parent_id, club_id))
+                cur.execute("""
+                    INSERT INTO league_movements(season, ts, club_id, from_league_id, to_league_id, reason)
+                    VALUES (?, ?, ?, ?, ?, 'promotion')
+                """, (season_str, apply_date.isoformat(), club_id, child_id, parent_id))
+                # print/log if you wish
+                # print(f"⬆️ Promoted: {club_id} to league {parent_id}")
+
+        # Relegate from parent to children in priority order
+        dq = deque(relegated_auto)
+        for pipe in pipes:
+            child_id = pipe["child"]
+            take = min(pipe["relegate_auto"], len(dq))
+            for _ in range(take):
+                club_id = dq.popleft()
+                cur.execute("UPDATE clubs SET league_id=? WHERE id=?", (child_id, club_id))
+                cur.execute("""
+                    INSERT INTO league_movements(season, ts, club_id, from_league_id, to_league_id, reason)
+                    VALUES (?, ?, ?, ?, ?, 'relegation')
+                """, (season_str, apply_date.isoformat(), club_id, parent_id, child_id))
+                # print(f"⬇️ Relegated: {club_id} to league {child_id}")
+
+    conn.commit()
+
+def sync_clubs_competition(cur):
+    """
+    Keep clubs_competition in sync: for every club that participates in *a* league,
+    ensure it has a row with competition_id == its current league_id.
+    If a row already exists with the previous league, update it; if missing, insert it.
+    """
+    # Clubs that have any league row in clubs_competition
+    cur.execute("SELECT club_id, competition_id FROM clubs_competition")
+    cc_map = {}
+    for club_id, comp_id in cur.fetchall():
+        cc_map.setdefault(club_id, set()).add(comp_id)
+
+    cur.execute("SELECT id, league_id FROM clubs")
+    for club_id, league_id in cur.fetchall():
+        if league_id is None:
+            continue
+        seen = cc_map.get(club_id, set())
+        if league_id in seen:
+            # already correct somewhere, but you may want to collapse duplicates:
+            cur.execute("""
+                DELETE FROM clubs_competition
+                WHERE club_id=? AND competition_id != ?
+            """, (club_id, league_id))
+        else:
+            # update one existing row if any; otherwise insert
+            if seen:
+                old = next(iter(seen))
+                cur.execute("""
+                    UPDATE clubs_competition
+                       SET competition_id=?
+                     WHERE club_id=? AND competition_id=?
+                """, (league_id, club_id, old))
+                # cleanup other duplicates if they existed
+                cur.execute("""
+                    DELETE FROM clubs_competition
+                    WHERE club_id=? AND competition_id!=?
+                """, (club_id, league_id))
+            else:
+                cur.execute("""
+                    INSERT INTO clubs_competition(club_id, competition_id)
+                    VALUES (?, ?)
+                """, (club_id, league_id))
+
 def handle_promotion_relegation():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    last_season = get_last_season(conn)
+    # 0) Ensure schema for link-driven promotions/relegations exists
+    ensure_league_links_schema(cur)
+    conn.commit()
 
-    # --- Bottom 3 from League 1 ---
-    cur.execute("""
-        WITH season_matches AS (
-            SELECT home_club_id, away_club_id, home_goals, away_goals, competition_id, season
-            FROM fixtures
-            WHERE competition_id = 1 AND played = 1
-        ),
-        club_stats AS (
-            SELECT
-                c.id AS club_id,
-                sm.season,
-                SUM(CASE 
-                        WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 1
-                        WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 1
-                        ELSE 0 END) AS wins,
-                SUM(CASE 
-                        WHEN sm.home_goals = sm.away_goals 
-                             AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
-                        ELSE 0 END) AS draws,
-                SUM(CASE 
-                        WHEN sm.home_club_id = c.id AND sm.home_goals < sm.away_goals THEN 1
-                        WHEN sm.away_club_id = c.id AND sm.away_goals < sm.home_goals THEN 1
-                        ELSE 0 END) AS losses,
-                SUM(CASE 
-                        WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 3
-                        WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 3
-                        WHEN sm.home_goals = sm.away_goals 
-                             AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
-                        ELSE 0 END) AS points,
-                SUM(CASE WHEN sm.home_club_id = c.id THEN sm.home_goals 
-                         WHEN sm.away_club_id = c.id THEN sm.away_goals ELSE 0 END) AS goals_for,
-                SUM(CASE WHEN sm.home_club_id = c.id THEN sm.away_goals 
-                         WHEN sm.away_club_id = c.id THEN sm.home_goals ELSE 0 END) AS goals_against
-            FROM clubs c
-            JOIN season_matches sm 
-              ON sm.home_club_id = c.id OR sm.away_club_id = c.id
-            GROUP BY c.id, sm.season
-        )
-        SELECT c.id, c.name, cs.points, cs.goals_for, cs.goals_against
-        FROM club_stats cs
-        JOIN clubs c ON c.id = cs.club_id
-        WHERE cs.season = ?
-        ORDER BY cs.points ASC, (cs.goals_for - cs.goals_against) ASC, cs.goals_for ASC, c.name
-        LIMIT 3;
-    """, (last_season,))
-    relegated = cur.fetchall()
+    # 1) Figure out the last finished season string
+    last_season = get_last_season(conn)   # e.g. "2025/26"
 
-    # --- Top 3 from League 2 ---
-    cur.execute("""
-        WITH season_matches AS (
-            SELECT home_club_id, away_club_id, home_goals, away_goals, competition_id, season
-            FROM fixtures
-            WHERE competition_id = 2 AND played = 1
-        ),
-        club_stats AS (
-            SELECT
-                c.id AS club_id,
-                sm.season,
-                SUM(CASE 
-                        WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 1
-                        WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 1
-                        ELSE 0 END) AS wins,
-                SUM(CASE 
-                        WHEN sm.home_goals = sm.away_goals 
-                             AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
-                        ELSE 0 END) AS draws,
-                SUM(CASE 
-                        WHEN sm.home_club_id = c.id AND sm.home_goals < sm.away_goals THEN 1
-                        WHEN sm.away_club_id = c.id AND sm.away_goals < sm.home_goals THEN 1
-                        ELSE 0 END) AS losses,
-                SUM(CASE 
-                        WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 3
-                        WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 3
-                        WHEN sm.home_goals = sm.away_goals 
-                             AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
-                        ELSE 0 END) AS points,
-                SUM(CASE WHEN sm.home_club_id = c.id THEN sm.home_goals 
-                         WHEN sm.away_club_id = c.id THEN sm.away_goals ELSE 0 END) AS goals_for,
-                SUM(CASE WHEN sm.home_club_id = c.id THEN sm.away_goals 
-                         WHEN sm.away_club_id = c.id THEN sm.home_goals ELSE 0 END) AS goals_against
-            FROM clubs c
-            JOIN season_matches sm 
-              ON sm.home_club_id = c.id OR sm.away_club_id = c.id
-            GROUP BY c.id, sm.season
-        )
-        SELECT c.id, c.name, cs.points, cs.goals_for, cs.goals_against
-        FROM club_stats cs
-        JOIN clubs c ON c.id = cs.club_id
-        WHERE cs.season = ?
-        ORDER BY cs.points DESC, (cs.goals_for - cs.goals_against) DESC, cs.goals_for DESC, c.name
-        LIMIT 3;
-    """, (last_season,))
-    promoted = cur.fetchall()
+    # 2) Apply generic promotions/relegations based on league_links
+    #    Pick a sensible apply date (e.g., June 1 of next calendar year)
+    #    If your seasons end in May, this is fine; adjust if you end elsewhere.
+    #    We'll infer the 'next' year from the "YYYY/YY" string defensively.
+    try:
+        y1 = int(last_season.split("/")[0])
+        apply_dt = date(y1 + 1, 6, 1)
+    except Exception:
+        # Fallback to today if parsing fails
+        apply_dt = date.today()
 
-    # --- Swap leagues ---
-    for cid, name, *_ in relegated:
-        cur.execute("UPDATE clubs SET league_id = 2 WHERE id = ?", (cid,))
-        cur.execute("UPDATE clubs_competition SET competition_id = 2 WHERE club_id = ? AND competition_id = 1", (cid,))
-        print(f"⬇️ Relegated: {name} → Championship")
+    apply_promotions_and_relegations(conn, last_season, apply_dt)
 
-    for cid, name, *_ in promoted:
-        cur.execute("UPDATE clubs SET league_id = 1 WHERE id = ?", (cid,))
-        cur.execute("UPDATE clubs_competition SET competition_id = 1 WHERE club_id = ? AND competition_id = 2", (cid,))
-        print(f"⬆️ Promoted: {name} → Premier League")
+    # 3) Keep clubs_competition in sync with the new league_id mapping
+    sync_clubs_competition(cur)
 
     conn.commit()
     conn.close()
     print(f"✅ Promotion/Relegation complete for season {last_season}")
+
+
+
+
+# def handle_promotion_relegation():
+#     conn = sqlite3.connect(DB_PATH)
+#     cur = conn.cursor()
+
+#     last_season = get_last_season(conn)
+
+#     # --- Bottom 3 from League 1 ---
+#     cur.execute("""
+#         WITH season_matches AS (
+#             SELECT home_club_id, away_club_id, home_goals, away_goals, competition_id, season
+#             FROM fixtures
+#             WHERE competition_id = 1 AND played = 1
+#         ),
+#         club_stats AS (
+#             SELECT
+#                 c.id AS club_id,
+#                 sm.season,
+#                 SUM(CASE 
+#                         WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 1
+#                         WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 1
+#                         ELSE 0 END) AS wins,
+#                 SUM(CASE 
+#                         WHEN sm.home_goals = sm.away_goals 
+#                              AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
+#                         ELSE 0 END) AS draws,
+#                 SUM(CASE 
+#                         WHEN sm.home_club_id = c.id AND sm.home_goals < sm.away_goals THEN 1
+#                         WHEN sm.away_club_id = c.id AND sm.away_goals < sm.home_goals THEN 1
+#                         ELSE 0 END) AS losses,
+#                 SUM(CASE 
+#                         WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 3
+#                         WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 3
+#                         WHEN sm.home_goals = sm.away_goals 
+#                              AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
+#                         ELSE 0 END) AS points,
+#                 SUM(CASE WHEN sm.home_club_id = c.id THEN sm.home_goals 
+#                          WHEN sm.away_club_id = c.id THEN sm.away_goals ELSE 0 END) AS goals_for,
+#                 SUM(CASE WHEN sm.home_club_id = c.id THEN sm.away_goals 
+#                          WHEN sm.away_club_id = c.id THEN sm.home_goals ELSE 0 END) AS goals_against
+#             FROM clubs c
+#             JOIN season_matches sm 
+#               ON sm.home_club_id = c.id OR sm.away_club_id = c.id
+#             GROUP BY c.id, sm.season
+#         )
+#         SELECT c.id, c.name, cs.points, cs.goals_for, cs.goals_against
+#         FROM club_stats cs
+#         JOIN clubs c ON c.id = cs.club_id
+#         WHERE cs.season = ?
+#         ORDER BY cs.points ASC, (cs.goals_for - cs.goals_against) ASC, cs.goals_for ASC, c.name
+#         LIMIT 3;
+#     """, (last_season,))
+#     relegated = cur.fetchall()
+
+#     # --- Top 3 from League 2 ---
+#     cur.execute("""
+#         WITH season_matches AS (
+#             SELECT home_club_id, away_club_id, home_goals, away_goals, competition_id, season
+#             FROM fixtures
+#             WHERE competition_id = 2 AND played = 1
+#         ),
+#         club_stats AS (
+#             SELECT
+#                 c.id AS club_id,
+#                 sm.season,
+#                 SUM(CASE 
+#                         WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 1
+#                         WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 1
+#                         ELSE 0 END) AS wins,
+#                 SUM(CASE 
+#                         WHEN sm.home_goals = sm.away_goals 
+#                              AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
+#                         ELSE 0 END) AS draws,
+#                 SUM(CASE 
+#                         WHEN sm.home_club_id = c.id AND sm.home_goals < sm.away_goals THEN 1
+#                         WHEN sm.away_club_id = c.id AND sm.away_goals < sm.home_goals THEN 1
+#                         ELSE 0 END) AS losses,
+#                 SUM(CASE 
+#                         WHEN sm.home_club_id = c.id AND sm.home_goals > sm.away_goals THEN 3
+#                         WHEN sm.away_club_id = c.id AND sm.away_goals > sm.home_goals THEN 3
+#                         WHEN sm.home_goals = sm.away_goals 
+#                              AND (sm.home_club_id = c.id OR sm.away_club_id = c.id) THEN 1
+#                         ELSE 0 END) AS points,
+#                 SUM(CASE WHEN sm.home_club_id = c.id THEN sm.home_goals 
+#                          WHEN sm.away_club_id = c.id THEN sm.away_goals ELSE 0 END) AS goals_for,
+#                 SUM(CASE WHEN sm.home_club_id = c.id THEN sm.away_goals 
+#                          WHEN sm.away_club_id = c.id THEN sm.home_goals ELSE 0 END) AS goals_against
+#             FROM clubs c
+#             JOIN season_matches sm 
+#               ON sm.home_club_id = c.id OR sm.away_club_id = c.id
+#             GROUP BY c.id, sm.season
+#         )
+#         SELECT c.id, c.name, cs.points, cs.goals_for, cs.goals_against
+#         FROM club_stats cs
+#         JOIN clubs c ON c.id = cs.club_id
+#         WHERE cs.season = ?
+#         ORDER BY cs.points DESC, (cs.goals_for - cs.goals_against) DESC, cs.goals_for DESC, c.name
+#         LIMIT 3;
+#     """, (last_season,))
+#     promoted = cur.fetchall()
+
+#     # --- Swap leagues ---
+#     for cid, name, *_ in relegated:
+#         cur.execute("UPDATE clubs SET league_id = 2 WHERE id = ?", (cid,))
+#         cur.execute("UPDATE clubs_competition SET competition_id = 2 WHERE club_id = ? AND competition_id = 1", (cid,))
+#         print(f"⬇️ Relegated: {name} → Championship")
+
+#     for cid, name, *_ in promoted:
+#         cur.execute("UPDATE clubs SET league_id = 1 WHERE id = ?", (cid,))
+#         cur.execute("UPDATE clubs_competition SET competition_id = 1 WHERE club_id = ? AND competition_id = 2", (cid,))
+#         print(f"⬆️ Promoted: {name} → Premier League")
+
+#     conn.commit()
+#     conn.close()
+#     print(f"✅ Promotion/Relegation complete for season {last_season}")
 
 
 def get_last_season(conn):
@@ -1392,6 +1871,9 @@ def game_loop():
                 if GAME_DATE.day == 1:
                     process_monthly_finances(conn, GAME_DATE)  
                     
+                if GAME_DATE.weekday() == 2:
+                    board_satisfaction_and_firing(conn, GAME_DATE)                     
+                    
                 update_game_date_db()
                 
                 # Every day we run the decision making for each club
@@ -1403,7 +1885,10 @@ def game_loop():
                     
                     # Screenshot of the tables once a year
                     for table in SNAPSHOT_TABLES:
-                        snapshot_table(table, GAME_DATE)
+                        if SNAPSHOT_TABLES_ACTIVE:
+                            snapshot_table(table, GAME_DATE)
+                        
+                    player_stats_summary_func(DB_PATH)
                         
                     # End-of-season board review
 
@@ -1414,15 +1899,23 @@ def game_loop():
                     populate_fixtures(1)
                     populate_fixtures(2)
                     cup_manage(3)
+                    populate_fixtures(4)
+                    populate_fixtures(5)
+                    cup_manage(6)
                     LEAGUE_ATK_MEAN = None
                     LEAGUE_DEF_MEAN = None
+                    
+                    top_up_free_agents(DB_PATH, GAME_DATE, fakers, per_club=5)
+                    
                     print("✅ New season fixtures generated!")
                     
                     renew_expired_contracts(conn, GAME_DATE)        # players
                     renew_expired_staff_contracts(conn, GAME_DATE)  # staff
-                    
+                     
+   
                 if GAME_DATE.weekday() == 4:
                     cup_manage(3)
+                    cup_manage(6)
 
                 GAME_DATE = advance_game_day(GAME_DATE)
                 cur.execute("UPDATE global_val SET value_date=? WHERE var_name='GAME_DATE'", (GAME_DATE.isoformat(),))
@@ -1441,7 +1934,8 @@ def game_loop():
                 if GAME_DATE.day == 1:
                     process_monthly_finances(conn, GAME_DATE)    
                 
-
+                if GAME_DATE.weekday() == 2:
+                    board_satisfaction_and_firing(conn, GAME_DATE)  
                 
                 update_game_date_db()
                 
@@ -1454,7 +1948,10 @@ def game_loop():
                     
                     # Screenshot of the tables once a year
                     for table in SNAPSHOT_TABLES:
-                        snapshot_table(table, GAME_DATE)
+                        if SNAPSHOT_TABLES_ACTIVE:
+                            snapshot_table(table, GAME_DATE)
+                        
+                    player_stats_summary_func(DB_PATH)
                     
                     # End-of-season board review
 
@@ -1465,8 +1962,14 @@ def game_loop():
                     populate_fixtures(1)
                     populate_fixtures(2)
                     cup_manage(3)
+                    populate_fixtures(4)
+                    populate_fixtures(5)
+                    cup_manage(6)
                     LEAGUE_ATK_MEAN = None
                     LEAGUE_DEF_MEAN = None
+                    
+                    top_up_free_agents(DB_PATH, GAME_DATE, fakers, per_club=5)
+                    
                     print("✅ New season fixtures generated!")
                     
                     renew_expired_contracts(conn, GAME_DATE)        # players
@@ -1474,6 +1977,7 @@ def game_loop():
                     
                 if GAME_DATE.weekday() == 4:
                     cup_manage(3)
+                    cup_manage(6)
                     
                 GAME_DATE = advance_game_day(GAME_DATE)
                 cur.execute("UPDATE global_val SET value_date=? WHERE var_name='GAME_DATE'", (GAME_DATE.isoformat(),))
@@ -1485,7 +1989,10 @@ def game_loop():
         else:
 
             if GAME_DATE.day == 1:
-                process_monthly_finances(conn, GAME_DATE)              
+                process_monthly_finances(conn, GAME_DATE)            
+                
+            if GAME_DATE.weekday() == 2:
+                board_satisfaction_and_firing(conn, GAME_DATE)                 
             
             update_game_date_db()
             
@@ -1497,7 +2004,10 @@ def game_loop():
                 
                 # Screenshot of the tables once a year
                 for table in SNAPSHOT_TABLES:
-                    snapshot_table(table, GAME_DATE)
+                    if SNAPSHOT_TABLES_ACTIVE:
+                        snapshot_table(table, GAME_DATE)
+                    
+                player_stats_summary_func(DB_PATH)
                 
                 # End-of-season board review
 
@@ -1508,8 +2018,14 @@ def game_loop():
                 populate_fixtures(1)
                 populate_fixtures(2)
                 cup_manage(3)
+                populate_fixtures(4)
+                populate_fixtures(5)
+                cup_manage(6)
                 LEAGUE_ATK_MEAN = None
                 LEAGUE_DEF_MEAN = None
+                
+                top_up_free_agents(DB_PATH, GAME_DATE, fakers, per_club=5)
+                
                 print("✅ New season fixtures generated!")
                 
                 renew_expired_contracts(conn, GAME_DATE)        # players
@@ -1517,6 +2033,7 @@ def game_loop():
                 
             if GAME_DATE.weekday() == 4:
                 cup_manage(3)
+                cup_manage(6)
 
             GAME_DATE = advance_game_day(GAME_DATE)
             cur.execute("UPDATE global_val SET value_date=? WHERE var_name='GAME_DATE'", (GAME_DATE.isoformat(),))
@@ -1532,48 +2049,82 @@ def game_loop():
 
 
 
-
-
 def populate_competition_clubs():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # Example: all clubs with league_id = 1 → Premier League (competition_id = 1)
-    cur.execute("SELECT id FROM competitions WHERE name = 'Premier League'")
-    premier_id = cur.fetchone()[0]
+    # 0) Make linking idempotent
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_clubs_competition_unique
+        ON clubs_competition (club_id, competition_id)
+    """)
 
-    cur.execute("SELECT id FROM clubs WHERE league_id = 1")
-    premier_clubs = [r[0] for r in cur.fetchall()]
-    cur.executemany("""
-        INSERT INTO clubs_competition (club_id, competition_id, is_active, round)
-        VALUES (?, ?,1,1)
-    """, [(cid, premier_id) for cid in premier_clubs])
+    # 1) Link ALL leagues automatically (no hardcoded IDs):
+    #    For every competition marked is_league=1, map all clubs whose clubs.league_id == competition.id
+    cur.execute("""
+        SELECT id, name, country
+        FROM competitions
+        WHERE COALESCE(is_league, 0) = 1
+    """)
+    leagues = cur.fetchall()
 
-    # Championship
-    cur.execute("SELECT id FROM competitions WHERE name = 'Championship'")
-    champ_id = cur.fetchone()[0]
+    for comp_id, comp_name, comp_country in leagues:
+        # Insert all clubs that belong to this league (by clubs.league_id)
+        cur.execute("""
+            INSERT OR IGNORE INTO clubs_competition (club_id, competition_id, is_active, round)
+            SELECT c.id, ?, 1, 1
+            FROM clubs c
+            WHERE c.league_id = ?
+        """, (comp_id, comp_id))
 
-    cur.execute("SELECT id FROM clubs WHERE league_id = 2")
-    champ_clubs = [r[0] for r in cur.fetchall()]
-    cur.executemany("""
-        INSERT INTO clubs_competition (club_id, competition_id, is_active, round)
-        VALUES (?, ?,1,1)
-    """, [(cid, champ_id) for cid in champ_clubs])
-
-    # FA Cup (just drop both leagues in for now)
+    # 2) FA Cup: include all English league clubs (from any English league)
     cur.execute("SELECT id FROM competitions WHERE name = 'FA Cup'")
-    fa_id = cur.fetchone()[0]
+    row = cur.fetchone()
+    if row:
+        fa_id = row[0]
+        # Get all English league competition IDs
+        cur.execute("""
+            SELECT id
+            FROM competitions
+            WHERE country='England' AND COALESCE(is_league,0)=1
+        """)
+        eng_league_ids = [r[0] for r in cur.fetchall()]
 
-    cur.execute("SELECT id FROM clubs")
-    fa_clubs = [r[0] for r in cur.fetchall()]
-    cur.executemany("""
-        INSERT INTO clubs_competition (club_id, competition_id, is_active)
-        VALUES (?, ?,1)
-    """, [(cid, fa_id) for cid in fa_clubs])
+        if eng_league_ids:
+            placeholders = ",".join("?" * len(eng_league_ids))
+            cur.execute(f"""
+                INSERT OR IGNORE INTO clubs_competition (club_id, competition_id, is_active, round)
+                SELECT c.id, ?, 1, NULL
+                FROM clubs c
+                WHERE c.league_id IN ({placeholders})
+            """, (fa_id, *eng_league_ids))
+            
+    # Copa del Rey
+    cur.execute("SELECT id FROM competitions WHERE name = 'Copa del Rey'")
+    row = cur.fetchone()
+    if row:
+        fa_id = row[0]
+        # Get all Spanish league competition IDs
+        cur.execute("""
+            SELECT id
+            FROM competitions
+            WHERE country='Spain' AND COALESCE(is_league,0)=1
+        """)
+        eng_league_ids = [r[0] for r in cur.fetchall()]
+
+        if eng_league_ids:
+            placeholders = ",".join("?" * len(eng_league_ids))
+            cur.execute(f"""
+                INSERT OR IGNORE INTO clubs_competition (club_id, competition_id, is_active, round)
+                SELECT c.id, ?, 1, NULL
+                FROM clubs c
+                WHERE c.league_id IN ({placeholders})
+            """, (fa_id, *eng_league_ids))
 
     conn.commit()
     conn.close()
     print("✅ Clubs linked to competitions")
+
 
 
 
@@ -2232,62 +2783,106 @@ def snapshot_table(base_table, game_date, db_path=DB_PATH):
     conn.close()
 
 
+import sqlite3
+from datetime import date, datetime
+
+def get_game_date_and_season():
+    """
+    Reads GAME_DATE (value_date) and SEASON (value_text) from global_val.
+    Returns (game_date: datetime.date, season_str: str).
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # GAME_DATE lives in value_date
+    row = cur.execute("""
+        SELECT value_date FROM global_val
+        WHERE var_name='GAME_DATE' LIMIT 1
+    """).fetchone()
+    if row and row[0]:
+        # row[0] may already be 'YYYY-MM-DD', parse safely
+        try:
+            game_date = datetime.fromisoformat(str(row[0])).date()
+        except ValueError:
+            game_date = date.today()
+    else:
+        game_date = date.today()
+
+    # SEASON lives in value_text (e.g., '2026/27')
+    row = cur.execute("""
+        SELECT value_text FROM global_val
+        WHERE var_name='SEASON' LIMIT 1
+    """).fetchone()
+    season_str = (row[0].strip() if row and row[0] else None)
+
+    # Fallback season if missing: infer from GAME_DATE (season flips July 1)
+    if not season_str:
+        y1 = game_date.year if game_date.month >= 7 else game_date.year - 1
+        season_str = f"{y1}/{(y1+1)%100:02d}"
+
+    conn.close()
+    return game_date, season_str
+
+
+
 # -----------------------------
 # Main
 # -----------------------------
 if __name__ == "__main__":
-    # Uncomment to hard reset DB schema & base tables:
-    init_db(DB_PATH, GAME_DATE)
 
-    # If you reset DB, (optionally) load clubs from CSV:
-    #depopulate_clubs()
-    populate_clubs()
-    initialize_club_balances()
-    populate_clubs_board()
+ 
 
-    populate_competition_clubs()
+    user_input = input("Press N for normal start, C to continue last save: ").strip().lower()
+    if user_input == "n":
+       
+        # Normal start       
 
-    update_game_date_db()           # keep GAME_DATE in DB in sync
-
-    # Fresh players & fixtures each run (like your previous workflow)
-    #depopulate_players()
-    #populate_400_players()
-    populate_all_players(DB_PATH, GAME_DATE, fakers)
-
-    depopulate_fixtures()
-    populate_fixtures(1)
-    populate_fixtures(2)
-
-    cup_manage(3)
-
-    populate_staff()
-
-
-    # FA Cup: usar semillado con fama para byes + prelim
-    #conn = sqlite3.connect(DB_PATH)
-    #seed_cup_round0_two_tier(conn, 3, GAME_DATE)  # competition_id=3 (FA Cup)
-    #conn.close()
-
-    depopulate_match_scorers()
-    depopulate_transfers_log()
-
-    # Optional: mini-situations system
-    # init_db_possib()
-    # clean_player_situ()
-    # run_game(16)
+        init_db(DB_PATH, GAME_DATE)
+        populate_clubs()
+        initialize_club_balances()
+        populate_clubs_board()
+        populate_competition_clubs()
+        update_game_date_db()           # keep GAME_DATE in DB in sync
+        populate_all_players(DB_PATH, GAME_DATE, fakers)
+        depopulate_fixtures()
+        populate_fixtures(1)
+        populate_fixtures(2)
+        populate_fixtures(4)
+        populate_fixtures(5)
+        cup_manage(3)
+        cup_manage(6)
+        populate_staff()
+        depopulate_match_scorers()
+        depopulate_transfers_log()
     
+        # Create historical tables    
+        for table in SNAPSHOT_TABLES:
+            if SNAPSHOT_TABLES_ACTIVE:
+                create_histo_table(table)   # reset fresh
+                snapshot_table(table, GAME_DATE)
+                
+        # # ---- NEW: pick human club before game loop ----
+        # conn = sqlite3.connect(DB_PATH)
+        # try:
+        #     chosen = choose_human_club(conn)
+        #     if chosen is None:
+        #         print("No club selected. Quitting.")
+        #         sys.exit(0)
+        #     else:
+        #         print(f"HUMAN_CLUB_ID set to {chosen}.")
+        # finally:
+        #     conn.close()
+        # # -----------------------------------------------
     
-    # Create historical tables
-    for table in SNAPSHOT_TABLES:
-        create_histo_table(table)   # reset fresh
-        snapshot_table(table, GAME_DATE)  # first snapshot
+        game_loop()
+
+    elif user_input == "c":
+
+        # Middle start
     
+        GAME_DATE, SEASON = get_game_date_and_season()
+        print(GAME_DATE, SEASON)  # e.g., 2026-01-15  2025/26
+        game_loop()
 
-    
-
-    # Kick off loop
-    game_loop()
-
-    # Debug helpers:
-    # print_table("players_attr")
-    # test_regen_creation(3, position="GK")
+    else:
+        print("Wrong option selected, quitting")

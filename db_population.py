@@ -8,9 +8,43 @@ from faker import Faker
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 import datetime as dt
-
+from typing import Tuple
 import decision_making
 from decision_making import adjust_board_satisfaction,season_end_board_adjustments
+
+
+# Nationality weighting by home league country
+# (Only uses nationalities you already support in fakers)
+NATIONALITY_PROFILES = {
+    "Spain": [
+        ("Spain", 65),   # strong domestic core
+        ("Argentina", 10),
+        ("France", 7),
+        ("Italy", 5),
+        ("Germany", 3),
+        ("Netherlands", 3),
+        ("England", 2),
+        ("Random", 5),
+    ],
+    "England": [
+        ("England", 70),
+        ("France", 6),
+        ("Germany", 5),
+        ("Netherlands", 5),
+        ("Spain", 4),
+        ("Italy", 4),
+        ("Argentina", 3),
+        ("Random", 3),
+    ],
+}
+
+# Fallback used when no profile is defined
+DEFAULT_NATIONALITY_WEIGHTS = [
+    ("England", 40), ("Spain", 20), ("France", 10),
+    ("Germany", 10), ("Italy", 8), ("Netherlands", 5),
+    ("Argentina", 4), ("Random", 3),
+]
+
 
 POSITION_ATTRIBUTE_CAPS = {
     "GK": {
@@ -107,6 +141,113 @@ position_attribute_weights = {
 
 
 
+# Adjacency graph (primary → nearby roles that make sense together)
+_ADJ = {
+    "GK": [],
+    "CB": ["RB", "LB"],
+    "RB": ["CB", "RM"],
+    "LB": ["CB", "LM"],
+    "CM": ["RM", "LM", "ST"],
+    "RM": ["RB", "CM", "ST"],
+    "LM": ["LB", "CM", "ST"],
+    "ST": ["RM", "LM", "CM"],
+}
+
+# If we still need one more related role, look one hop further from these seeds
+_SECOND_HOP_FALLBACK = {
+    "CB": ["CM"],
+    "RB": ["RM", "CM"],
+    "LB": ["LM", "CM"],
+    "CM": ["CB", "ST"],
+    "RM": ["RB", "CM", "ST"],
+    "LM": ["LB", "CM", "ST"],
+    "ST": ["RM", "LM"],
+    "GK": [],
+}
+
+def _weighted_choice(weights):
+    """Return index 0..n-1 chosen by given integer weights."""
+    total = sum(weights)
+    r = random.uniform(0, total)
+    upto = 0.0
+    for i, w in enumerate(weights):
+        if upto + w >= r:
+            return i
+        upto += w
+    return len(weights) - 1  # fallback
+
+def _pick_foot(primary: str) -> str:
+    """
+    Foot distribution:
+      - Side roles: bias to the natural side, but allow opposite + both.
+      - Central roles: near-even.
+    """
+    right_roles = {"RB", "RM"}
+    left_roles  = {"LB", "LM"}
+    # weights are (Right, Left, Both)
+    if primary in right_roles:
+        opts, w = ("Right", "Left", "Both"), (60, 25, 15)
+    elif primary in left_roles:
+        opts, w = ("Right", "Left", "Both"), (25, 60, 15)
+    else:  # CB, CM, ST, GK
+        opts, w = ("Right", "Left", "Both"), (45, 45, 10)
+    return opts[_weighted_choice(w)]
+
+def random_positions_and_foot(primary: str) -> Tuple[Tuple[str, ...], str]:
+    """
+    Given a primary position (GK, CB, RB, LB, CM, RM, LM, ST),
+    return (positions_tuple, foot_str).
+
+    - #positions ~ 70%:1, 20%:2, 10%:3
+    - Extra positions are role-adjacent (first-hop, then second-hop if needed)
+    - Footedness is biased but sometimes “illogical” by design.
+    """
+    primary = primary.upper()
+    if primary not in _ADJ:
+        # unknown role: treat as single-role, neutral foot
+        return (primary,), random.choice(["Right", "Left", "Both"])
+
+    # how many positions?
+    n_positions = (1, 2, 3)[_weighted_choice((70, 20, 10))]
+
+    positions = [primary]
+    if n_positions == 1 or primary == "GK":
+        return (tuple(positions), _pick_foot(primary))
+
+    # build a pool of related roles (first hop)
+    pool = list(_ADJ[primary])
+
+    # if we still need more, enrich with a second hop that keeps things sensible
+    if len(pool) < (n_positions - 1):
+        for extra in _SECOND_HOP_FALLBACK.get(primary, []):
+            if extra not in pool and extra != primary:
+                pool.append(extra)
+
+    # still short? add a very loose final fallback from same “band”
+    if len(pool) < (n_positions - 1):
+        bands = {
+            "DEF": {"CB", "RB", "LB"},
+            "MID": {"CM", "RM", "LM"},
+            "ATT": {"ST"},
+            "GK" : {"GK"},
+        }
+        band = "GK" if primary == "GK" else ("DEF" if primary in bands["DEF"]
+                    else "MID" if primary in bands["MID"] else "ATT")
+        loose = list(bands[band] - {primary} - set(pool))
+        random.shuffle(loose)
+        pool.extend(loose)
+
+    random.shuffle(pool)
+    for pos in pool:
+        if len(positions) >= n_positions:
+            break
+        if pos not in positions:
+            positions.append(pos)
+
+    return (tuple(positions[:n_positions]), _pick_foot(primary))
+
+
+
 def calculate_player_fame(age, curr_ability, club_fame):
     # Normalize ability (0–1)
     ability_score = curr_ability / 2000.0
@@ -132,6 +273,20 @@ def calculate_player_fame(age, curr_ability, club_fame):
     # Clamp to 1–2000
     return int(max(1, min(fame, 2000)))
 
+def gen_logs_insert(DB_PATH, GAME_DATE, log_type, log_desc):
+    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
+    cur = conn.cursor()
+    
+    cur.execute(
+        "INSERT INTO gen_logs (real_date, game_date, log_type, log_desc) VALUES (?, ?, ?, ?)",
+        (datetime.now(), GAME_DATE.isoformat(), log_type, log_desc)
+    )
+    
+    conn.commit()     
+    
+    conn.close()
+    
+
 def init_db(DB_PATH, GAME_DATE):
     conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
     cur = conn.cursor()
@@ -139,6 +294,7 @@ def init_db(DB_PATH, GAME_DATE):
     cur.executescript("""
     DROP TABLE IF EXISTS fixtures;
     DROP TABLE IF EXISTS players;
+    DROP TABLE IF EXISTS players_positions;
     DROP TABLE IF EXISTS players_attr;
     DROP TABLE IF EXISTS player_situ;
     DROP TABLE IF EXISTS players_stats;
@@ -158,6 +314,11 @@ def init_db(DB_PATH, GAME_DATE):
     DROP TABLE IF EXISTS clubs_competition;
     DROP TABLE IF EXISTS clubs_monthly_economy;
     DROP TABLE IF EXISTS clubs_board;
+    DROP TABLE IF EXISTS gen_logs;
+    DROP TABLE IF EXISTS transfers_log;
+    DROP TABLE IF EXISTS player_stats_summary;
+    DROP TABLE IF EXISTS league_links;  
+    DROP TABLE IF EXISTS league_movements;  
     """)
 
     cur.executescript("""
@@ -168,10 +329,30 @@ def init_db(DB_PATH, GAME_DATE):
          value_int INTEGER,
          value_date DATE
      );
+     
+    CREATE TABLE IF NOT EXISTS gen_logs (
+        --id INTEGER PRIMARY KEY AUTOINCREMENT,
+        real_date DATE NOT NULL,        
+        game_date DATE NOT NULL,
+        log_type TEXT NOT NULL,   
+        log_desc TEXT NOT NULL
+    );  
+
+    CREATE TABLE IF NOT EXISTS transfers_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts DATE NOT NULL,
+        type TEXT NOT NULL,                -- 'free' | 'transfer'
+        from_club_id INTEGER,
+        to_club_id INTEGER,
+        player_id INTEGER NOT NULL,
+        fee INTEGER DEFAULT 0,
+        wage INTEGER DEFAULT 0,
+        contract_end DATE
+    );
 
 
     CREATE TABLE competitions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
         country TEXT NOT NULL,
         level INTEGER,
@@ -182,6 +363,32 @@ def init_db(DB_PATH, GAME_DATE):
         total_clubs INTEGER,
         is_league BOOLEAN,
         is_cup BOOLEAN
+    );
+
+    CREATE TABLE league_links (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        parent_league_id  INTEGER NOT NULL,   -- superior league (e.g., League 1)
+        child_league_id   INTEGER NOT NULL,   -- inferior league (e.g., League 2 / North)
+        promote_automatic INTEGER NOT NULL DEFAULT 2,  -- auto promotions from child to parent
+        promote_playoff   INTEGER NOT NULL DEFAULT 0,  -- (optional) extra via playoffs
+        relegate_automatic INTEGER NOT NULL DEFAULT 2, -- auto relegations from parent down to this child
+        relegate_playoff   INTEGER NOT NULL DEFAULT 0, -- (optional) extra via playoffs
+        priority          INTEGER NOT NULL DEFAULT 1,  -- when multiple children feed one parent, fill in this order
+        is_active         INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(parent_league_id, child_league_id),
+        FOREIGN KEY(parent_league_id) REFERENCES leagues(id),
+        FOREIGN KEY(child_league_id)  REFERENCES leagues(id)
+    );
+    
+    CREATE TABLE league_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        season TEXT NOT NULL,        -- e.g. '2025/26'
+        ts DATE NOT NULL,            -- when applied
+        club_id INTEGER NOT NULL,
+        from_league_id INTEGER NOT NULL,
+        to_league_id   INTEGER NOT NULL,
+        reason TEXT,                 -- 'promotion', 'relegation', 'playoff'
+        FOREIGN KEY(club_id) REFERENCES clubs(id)
     );
 
     CREATE TABLE clubs (
@@ -246,6 +453,13 @@ def init_db(DB_PATH, GAME_DATE):
         last_transfer_ts DATE,
         FOREIGN KEY (club_id) REFERENCES clubs(id)
     );
+    
+    CREATE TABLE players_positions (
+        player_id INTEGER,
+        position TEXT,
+        foot TEXT,
+        FOREIGN KEY (player_id) REFERENCES players(id)
+    );
 
     CREATE TABLE players_contract (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -286,7 +500,7 @@ def init_db(DB_PATH, GAME_DATE):
     CREATE TABLE players_stats (
         player_id INTEGER,
         fixture_id INTEGER,
-        
+        club_id INTEGER,
         minutes_played INTEGER,
         tackles_attempted INTEGER,
         tackles_comp INTEGER,
@@ -305,6 +519,34 @@ def init_db(DB_PATH, GAME_DATE):
 
         FOREIGN KEY (player_id) REFERENCES players(id),
         FOREIGN KEY (fixture_id) REFERENCES fixtures(id)
+        
+    );
+
+    CREATE TABLE player_stats_summary (
+        season TEXT,
+        player_id INTEGER,
+        club_id INTEGER,
+        competition_id INTEGER,
+        
+        matches_played INTEGER,
+        
+        minutes_played_avg INTEGER,
+
+        tackles_comp_percent INTEGER,
+        
+        passes_comp_percent INTEGER,
+        
+        shoots_target_percent INTEGER,
+        
+        goals_scored_total INTEGER,
+
+        yellow_cards_total INTEGER,
+
+        red_cards_total INTEGER,        
+
+        FOREIGN KEY (player_id) REFERENCES players(id),
+        FOREIGN KEY (competition_id) REFERENCES competitions(id),
+        FOREIGN KEY (club_id) REFERENCES clubs(id)
         
     );
 
@@ -379,19 +621,101 @@ def init_db(DB_PATH, GAME_DATE):
     );
     """)
 
-    leagues = [("Premier League", "England", 1, 20, True, False),
-               ("Championship", "England", 2, 20, True, False),
-               ("FA Cup", "England", 99, 40, False, True)
-               ]
-    cur.executemany("INSERT INTO competitions (name, country, level, total_clubs, is_league, is_cup) VALUES (?, ?, ?, ?, ?, ?)", leagues)
+    leagues = [
+        # England
+        (1, "Premier League",     "England", 1, 20, 1, 0),
+        (2, "Championship",       "England", 2, 20, 1, 0),  # keep 20 to match your current setup
+        (3, "FA Cup",             "England", 99, 40, 0, 1),
+    
+        # Spain
+        (4, "LaLiga",             "Spain",   1, 20, 1, 0),  # Spanish First Division
+        (5, "Segunda División",   "Spain",   2, 22, 1, 0),  # Spanish Second Division (commonly 22)
+        (6, "Copa del Rey",       "Spain", 99, 42, 0, 1)
+    ]
+    cur.executemany("""
+        INSERT INTO competitions (id, name, country, level, total_clubs, is_league, is_cup)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, leagues)
+    
+    
+    cur.execute("""
+            INSERT INTO league_links(parent_league_id, child_league_id, promote_automatic, relegate_automatic, priority)
+            VALUES (1, 2, 2, 2, 1);
+    """)
+    
+    cur.execute("""
+            INSERT INTO league_links(parent_league_id, child_league_id, promote_automatic, relegate_automatic, priority)
+            VALUES (4, 5, 2, 2, 1);
+    """)
 
     cur.execute("INSERT INTO global_val (var_name, value_date) VALUES (?, ?)", ("GAME_DATE", GAME_DATE.isoformat()))
     cur.execute("INSERT INTO global_val (var_name, value_text) VALUES (?, ?)", ("SEASON", "2025/26"))
     
     conn.commit()
+    
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_transfers_log_ts ON transfers_log(ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_transfers_log_player ON transfers_log(player_id)")
+    # prevent two moves for same player on the same day
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_transfers_log_player_day ON transfers_log(player_id, ts)")
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_players_club_alive ON players(club_id, is_retired)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_players_positions_pos ON players_positions(position, player_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_players_positions_player ON players_positions(player_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_players_attr_player ON players_attr(player_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_transfers_log_player_ts ON transfers_log(player_id, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_staff_club_role ON staff(club_id, role)")        
+        
+    conn.commit()     
+    
     conn.close()
     print("✅ Database initialized:", DB_PATH)
     
+    
+def player_stats_summary_func(DB_PATH):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO player_stats_summary(season, player_id, club_id, competition_id, matches_played, minutes_played_avg, tackles_comp_percent, passes_comp_percent, shoots_target_percent, goals_scored_total, yellow_cards_total, red_cards_total)
+        SELECT
+        	f.season,
+            ps.player_id,
+            ps.club_id,
+            f.competition_id,
+            count(f.id),
+            AVG(ps.minutes_played)            AS avg_minutes,
+            ROUND(
+                100.0 * SUM(COALESCE(ps.tackles_comp, 0))
+                / NULLIF(SUM(COALESCE(ps.tackles_attempted, 0)), 0)
+            , 2) 	AS tackles_comp_pct,
+            ROUND(
+                100.0 * SUM(COALESCE(ps.passes_comp, 0))
+                / NULLIF(SUM(COALESCE(ps.passes_attempted, 0)), 0)
+            , 2) 	AS passes_comp_pct,
+            ROUND(
+                100.0 * SUM(COALESCE(ps.shoots_target, 0))
+                / NULLIF(SUM(COALESCE(ps.shoots_attempted, 0)), 0)
+            , 2) 	AS shoots_target_pct,
+        	sum(goals_scored) as goals_scored_total,
+        	sum(yellow_cards) as yellow_cards_total,
+        	sum(red_cards) as red_cards_total
+        FROM players_stats ps
+        JOIN fixtures f ON f.id = ps.fixture_id
+        GROUP BY f.season, ps.player_id, f.competition_id, ps.club_id
+    """)
+    conn.commit()
+    
+    cur.execute("""
+            DELETE FROM players_stats
+    """)
+    
+    cur.execute("""
+            DELETE FROM match_scorers
+    """)    
+    
+    conn.commit()
+    conn.close()
     
 
 def distribute_attributes(curr_ability, pot_ability, position, club_fame=1000):
@@ -463,17 +787,24 @@ def random_potential():
     lo, hi, _ = random.choices(buckets, weights=[b[2] for b in buckets])[0]
     return random.randint(lo, hi)
 
-def generate_player(GAME_DATE, fakers, position=None, club_id=None, club_fame=None, force_youth=False):
-    # --- Identity ---
-    nationalities = ["England", "Argentina", "Spain", "Germany", "Netherlands", "France", "Italy", "Random"]
-    weights = [90, 1, 1, 2, 1, 1, 1, 3]
-    nationality = random.choices(nationalities, weights=weights, k=1)[0]
-    faker = fakers[nationality]
+def generate_player(GAME_DATE, fakers, position=None, club_id=None, club_fame=None, force_youth=False, home_country=None):
+    # --- Identity / Nationality (country-aware) ---
+    if home_country and home_country in NATIONALITY_PROFILES:
+        choices = NATIONALITY_PROFILES[home_country]
+    else:
+        choices = DEFAULT_NATIONALITY_WEIGHTS
+
+    nat_labels = [n for n, _ in choices]
+    nat_weights = [w for _, w in choices]
+    nationality = random.choices(nat_labels, weights=nat_weights, k=1)[0]
+
+    faker = fakers[nationality] if nationality in fakers else fakers["Random"]
     if nationality == "Random":
         nationality = faker.country()
 
     first_name = faker.first_name_male()
-    last_name = faker.last_name()
+    last_name  = faker.last_name()
+    # (rest of your generate_player stays the same)
 
     # --- Position ---
     if position is None:
@@ -563,11 +894,149 @@ def calculate_age(birth_date, game_date):
     return age
 
 
+
+def top_up_free_agents(DB_PATH, GAME_DATE, fakers, per_club=5):
+    """
+    Ensure there are at least (per_club × #league clubs) free agents available.
+    Keeps positional balance similar to club needs.
+    """
+    import sqlite3, datetime as dt, random
+
+    # Positional mix for the pool (GK fewer, ST/CB a bit more)
+    POS_WEIGHTS = {
+        "GK": 1, "CB": 3, "RB": 2, "LB": 2, "CDM": 1, "CM": 2, "CAM": 1,
+        "RM": 1, "LM": 1, "RW": 1, "LW": 1, "ST": 3
+    }
+    POSITIONS = list(POS_WEIGHTS.keys())
+    WEIGHTS   = [POS_WEIGHTS[p] for p in POSITIONS]
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # Count league clubs (ignore cups)
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM clubs c
+        JOIN competitions comp ON comp.id = c.league_id
+        WHERE comp.is_league = 1
+    """)
+    clubs_n = cur.fetchone()[0] or 0
+
+    # Current free agents (unemployed + not retired)
+    cur.execute("SELECT COUNT(*) FROM players WHERE club_id IS NULL AND is_retired = 0")
+    free_now = cur.fetchone()[0] or 0
+
+    target = per_club * clubs_n
+    need = max(0, target - free_now)
+    if need == 0:
+        conn.close()
+        print(f"✅ Free-agent pool already sufficient: {free_now}/{target}")
+        return
+
+    print(f"➕ Creating {need} free agents to reach {target} total ({free_now} → {target})")
+
+    new_players, new_attrs, new_contracts, pos_rows = [], [], [], []
+
+    # Build a small helper to save one player
+    def _append_free(position):
+        # Use a neutral market context for FAs (club_id=None, club_fame=1000)
+        p, a, c = generate_player(
+            GAME_DATE, fakers,
+            position=position, club_id=None, club_fame=1000,
+            home_country=None  # default nationality mix
+        )
+
+        # Fame from ability/age for consistency
+        age = calculate_age(p[2], GAME_DATE)
+        curr_ability = a[-2]
+        fame = calculate_player_fame(age, curr_ability, 1000)
+
+        dob = p[2].isoformat() if isinstance(p[2], dt.date) else p[2]
+
+        # players row (note: second_nationality None)
+        new_players.append((
+            p[0], p[1], dob, p[3], None, p[4], None, p[6], fame, fame
+        ))
+
+        # attrs as-is
+        new_attrs.append(a)
+
+        # unemployed contract (0 wage, open end)
+        new_contracts.append((None, "Unemployed", GAME_DATE.isoformat(), None, 0))
+
+        # players_positions (primary + extras)
+        positions_tuple, foot_str = random_positions_and_foot(p[4])
+        for pos in positions_tuple:
+            pos_rows.append((None, pos, foot_str))  # player_id filled after insert
+
+    # Choose positions according to weights
+    positions_to_make = random.choices(POSITIONS, weights=WEIGHTS, k=need)
+    for pos in positions_to_make:
+        _append_free(pos)
+
+    # --- Insert all rows ---
+    cur.executemany("""
+        INSERT INTO players (
+            first_name, last_name, date_of_birth, nationality, second_nationality,
+            position, club_id, value, fame, peak_fame
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, new_players)
+
+    # Resolve new IDs
+    last_rowid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
+    start_id = last_rowid - len(new_players) + 1
+    pids = list(range(start_id, start_id + len(new_players)))
+
+    # Attributes
+    cur.executemany("""
+        INSERT INTO players_attr (
+            player_id,
+            at_luck, at_selfcont, at_honour, at_crazyness, at_working,
+            at_sexatract, at_friendship, at_speed, at_dribbling,
+            at_goalkeeping, at_defending, at_passing, at_scoring,
+            at_happiness, at_confidence, at_hope,
+            at_curr_ability, at_pot_ability
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, [(pid, *a) for pid, a in zip(pids, new_attrs)])
+
+    # Contracts
+    cur.executemany("""
+        INSERT INTO players_contract (
+            player_id, club_id, contract_type, contract_start, contract_end, wage
+        ) VALUES (?, ?, ?, ?, ?, ?)
+    """, [(pid, *c) for pid, c in zip(pids, new_contracts)])
+
+    # players_positions
+    # Replace placeholder None with actual pid
+    filled_pos_rows = []
+    for pid, (ppid, pos, foot) in zip(pids, pos_rows[::len(pos_rows)//len(pids) or 1]):  # robust stride
+        # Each player may have 1–3 positions; rebuild per player to keep variety
+        primary = new_players[pids.index(pid)][5]
+        positions_tuple, foot_str = random_positions_and_foot(primary)
+        for ppos in positions_tuple:
+            filled_pos_rows.append((pid, ppos, foot_str))
+
+    cur.executemany(
+        "INSERT INTO players_positions (player_id, position, foot) VALUES (?, ?, ?)",
+        filled_pos_rows
+    )
+
+    conn.commit()
+    conn.close()
+    print(f"✅ Added {need} new free agents (total now ≥ {target})")
+
+
+
 def populate_all_players(DB_PATH, GAME_DATE, fakers):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     def create_players_for_league(league_id):
+        # get league country once
+        cur.execute("SELECT country FROM competitions WHERE id = ?", (league_id,))
+        row = cur.fetchone()
+        league_country = row[0] if row else None
+    
         cur.execute("SELECT id, fame FROM clubs WHERE league_id = ?", (league_id,))
         clubs = cur.fetchall()
         if not clubs:
@@ -580,51 +1049,46 @@ def populate_all_players(DB_PATH, GAME_DATE, fakers):
             "RM": 1, "LM": 1, "RW": 1, "LW": 1,
             "ST": 3
         }
-
+    
         players, attrs, contracts = [], [], []
         for club_id, club_fame in clubs:
             for pos, count in position_counts.items():
                 for _ in range(count):
-                    p, a, c = generate_player(GAME_DATE,fakers,position=pos, club_id=club_id, club_fame=club_fame)
-
-                    # Calculate fame & peak_fame
+                    p, a, c = generate_player(
+                        GAME_DATE, fakers,
+                        position=pos, club_id=club_id, club_fame=club_fame,
+                        home_country=league_country  # ← key change
+                    )
+    
+                    # (your fame/ISO DOB packing exactly as before)
                     age = calculate_age(p[2], GAME_DATE)
                     curr_ability = a[-2]
                     fame = calculate_player_fame(age, curr_ability, club_fame)
-
-                    # Ensure date is ISO string
-                    if isinstance(p[2], dt.date):
-                        dob = p[2].isoformat()
-                    else:
-                        dob = p[2]
-
-                    # p structure: (first_name, last_name, date_of_birth, nationality, position, club_id, value)
-                    players.append((
-                        p[0],        # first_name
-                        p[1],        # last_name
-                        dob,         # date_of_birth
-                        p[3],        # nationality
-                        None,        # second_nationality (not used yet)
-                        p[4],        # position
-                        p[5],        # club_id
-                        p[6],        # value
-                        fame,        # fame
-                        fame         # peak_fame
-                    ))
+                    dob = p[2].isoformat() if isinstance(p[2], dt.date) else p[2]
+    
+                    players.append((p[0], p[1], dob, p[3], None, p[4], p[5], p[6], fame, fame))
                     attrs.append(a)
                     contracts.append(c)
 
         return players, attrs, contracts
 
-    # --- League players
-    players1, attrs1, contracts1 = create_players_for_league(1)
-    players2, attrs2, contracts2 = create_players_for_league(2)
+    # 🔎 Find all league_ids that actually have clubs (works for ENG + ESP + future leagues)
+    cur.execute("SELECT DISTINCT league_id FROM clubs WHERE league_id IS NOT NULL")
+    league_ids = [r[0] for r in cur.fetchall()]
+    if not league_ids:
+        print("⚠️ No leagues found in clubs; nothing to generate.")
+        conn.close()
+        return
 
-    players = players1 + players2
-    attrs = attrs1 + attrs2
-    contracts = contracts1 + contracts2
+    # Generate for every league present (e.g., 1,2,4,5)
+    all_players, all_attrs, all_contracts = [], [], []
+    for lid in league_ids:
+        p, a, c = create_players_for_league(lid)
+        all_players += p
+        all_attrs += a
+        all_contracts += c
 
-    if not players:
+    if not all_players:
         print("⚠️ No players generated.")
         conn.close()
         return
@@ -635,14 +1099,15 @@ def populate_all_players(DB_PATH, GAME_DATE, fakers):
             first_name, last_name, date_of_birth, nationality, second_nationality,
             position, club_id, value, fame, peak_fame
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, players)
+    """, all_players)
 
+    # IDs for attrs/contracts
     last_rowid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
-    start_id = last_rowid - len(players) + 1
-    player_ids = list(range(start_id, start_id + len(players)))
+    start_id = last_rowid - len(all_players) + 1
+    player_ids = list(range(start_id, start_id + len(all_players)))
 
     # Attributes
-    players_attr_with_ids = [(pid, *attr) for pid, attr in zip(player_ids, attrs)]
+    players_attr_with_ids = [(pid, *attr) for pid, attr in zip(player_ids, all_attrs)]
     cur.executemany("""
         INSERT INTO players_attr (
             player_id,
@@ -655,68 +1120,31 @@ def populate_all_players(DB_PATH, GAME_DATE, fakers):
     """, players_attr_with_ids)
 
     # Contracts
-    players_contracts_with_ids = [(pid, *c) for pid, c in zip(player_ids, contracts)]
+    players_contracts_with_ids = [(pid, *c) for pid, c in zip(player_ids, all_contracts)]
     cur.executemany("""
         INSERT INTO players_contract (
             player_id, club_id, contract_type, contract_start, contract_end, wage
         ) VALUES (?, ?, ?, ?, ?, ?)
     """, players_contracts_with_ids)
 
-    print(f"✅ {len(players)} league players generated with contracts")
-
-    # --- Free agent pool (50 players)
-    free_players, free_attrs, free_contracts = [], [], []
-    for _ in range(50):
-        p, a, c = generate_player(GAME_DATE,fakers, position=None, club_id=None, club_fame=1000)
-        age = calculate_age(p[2], GAME_DATE)
-        curr_ability = a[-2]
-        fame = calculate_player_fame(age, curr_ability, 1000)
-
-        dob = p[2].isoformat() if isinstance(p[2], dt.date) else p[2]
-
-        free_players.append((
-            p[0],   # first_name
-            p[1],   # last_name
-            dob,    # date_of_birth
-            p[3],   # nationality
-            None,   # second_nationality
-            p[4],   # position
-            None,   # no club
-            p[6],   # value
-            fame,
-            fame
-        ))
-        free_attrs.append(a)
-        free_contracts.append((None, "Unemployed", GAME_DATE.isoformat(), None, 0))
-
-    cur.executemany("""
-        INSERT INTO players (
-            first_name, last_name, date_of_birth, nationality, second_nationality,
-            position, club_id, value, fame, peak_fame
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, free_players)
-
-    last_rowid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
-    start_id = last_rowid - len(free_players) + 1
-    free_ids = list(range(start_id, start_id + len(free_players)))
-
-    # Attributes
-    players_attr_with_ids = [(pid, *attr) for pid, attr in zip(free_ids, free_attrs)]
-    cur.executemany("""
-        INSERT INTO players_attr (
-            player_id, at_luck, at_selfcont, at_honour, at_crazyness, at_working,
-            at_sexatract, at_friendship, at_speed, at_dribbling,
-            at_goalkeeping, at_defending, at_passing, at_scoring,
-            at_happiness, at_confidence, at_hope,
-            at_curr_ability, at_pot_ability
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, players_attr_with_ids)
+    # players_positions (primary + extras)
+    pos_rows = []
+    for pid, p in zip(player_ids, all_players):
+        primary_pos = p[5]  # position column in all_players tuple
+        positions_tuple, foot_str = random_positions_and_foot(primary_pos)
+        for pos in positions_tuple:
+            pos_rows.append((pid, pos, foot_str))
+    if pos_rows:
+        cur.executemany(
+            "INSERT INTO players_positions (player_id, position, foot) VALUES (?, ?, ?)",
+            pos_rows
+        )
 
     conn.commit()
     conn.close()
-    print(f"✅ {len(free_players)} free agent players generated")
-    
-    
+    print(f"✅ {len(all_players)} league players generated with contracts")
+    print("✅ players_positions rows added")
+
 
 # -----------------------------
 # Situations mini-game (optional)

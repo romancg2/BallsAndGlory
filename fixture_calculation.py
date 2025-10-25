@@ -26,11 +26,26 @@ def pick_scorers(cur, club_id, goals, fixture_id, team_name, eligible_ids=None):
         return [], []
 
     cur.execute("""
-        SELECT p.id, p.first_name, p.last_name, p.position,
-               pa.at_curr_ability, pa.at_scoring, pa.at_speed
+        SELECT
+          p.id,
+          p.first_name,
+          p.last_name,
+          COALESCE(
+            (SELECT pp.position
+             FROM players_positions pp
+             WHERE pp.player_id = p.id
+             ORDER BY pp.position
+             LIMIT 1),
+            p.position,
+            'CM'
+          ) AS position,
+          pa.at_curr_ability, pa.at_scoring, pa.at_speed
         FROM players p
         JOIN players_attr pa ON pa.player_id = p.id
         WHERE p.club_id = ? AND p.is_retired = 0
+
+
+
     """, (club_id,))
     players = cur.fetchall()
 
@@ -202,12 +217,24 @@ def team_strengths(cur, club_id):
     Fame is applied later in the match simulation.
     """
     cur.execute("""
-        SELECT pa.at_scoring, pa.at_speed, pa.at_passing, pa.at_dribbling,
-               pa.at_defending, pa.at_goalkeeping, pa.at_selfcont,
-               p.position
+        SELECT
+          pa.at_scoring, pa.at_speed, pa.at_passing, pa.at_dribbling,
+          pa.at_defending, pa.at_goalkeeping, pa.at_selfcont,
+          COALESCE(
+            (SELECT pp.position
+             FROM players_positions pp
+             WHERE pp.player_id = p.id
+             ORDER BY pp.position
+             LIMIT 1),
+            p.position,
+            'CM'
+          ) AS position
         FROM players_attr pa
         JOIN players p ON pa.player_id = p.id
         WHERE p.club_id = ? AND p.is_retired = 0
+        
+                
+
     """, (club_id,))
     rows = cur.fetchall()
 
@@ -382,13 +409,26 @@ def get_realistic_squad(cur, club_id):
 
     # 3️⃣ Fetch players
     cur.execute("""
-        SELECT p.id, p.position,
-               pa.at_defending, pa.at_passing, pa.at_scoring,
-               pa.at_goalkeeping, pa.at_speed, pa.at_curr_ability
+        SELECT
+          p.id,
+          COALESCE(
+            (SELECT pp.position
+             FROM players_positions pp
+             WHERE pp.player_id = p.id
+             ORDER BY pp.position
+             LIMIT 1),
+            p.position,
+            'CM'
+          ) AS position,
+          pa.at_defending, pa.at_passing, pa.at_scoring,
+          pa.at_goalkeeping, pa.at_speed, pa.at_curr_ability
         FROM players p
         JOIN players_attr pa ON pa.player_id = p.id
         WHERE p.club_id = ? AND p.is_retired = 0
         ORDER BY pa.at_curr_ability DESC
+
+
+
     """, (club_id,))
     all_players = cur.fetchall()
     if not all_players:
@@ -487,36 +527,20 @@ def simulate_fixtures_for_day(conn, day):
     
     
     
-    def expected_goals_local(attack, opp_defense, fame_mult, form_mult, home_side):
-        """
-        Refined goal expectation tuned for ~2.4–2.6 goals per match.
-        Limits blowouts, stabilizes variance, and adds mild home edge.
-        """
-        # ⚙️ Lower global base (previously ~1.25 / 1.05)
+    def expected_goals_local(attack, opp_defense, fame_mult, form_mult, home_side, atk_mean, def_mean):
         base = 1.05 if home_side else 0.95
-    
-        atk_n = attack / max(1.0, LEAGUE_ATK_MEAN)
-        def_n = opp_defense / max(1.0, LEAGUE_DEF_MEAN)
-    
-        # Slightly gentler curvature — less runaway λ for strong teams
+        atk_n = attack / max(1.0, atk_mean)
+        def_n = opp_defense / max(1.0, def_mean)
         ratio = (atk_n ** 1.0) / (def_n ** 1.0)
-    
         fame_adj = 1.0 + (fame_mult - 1.0) * 0.3
         form_adj = 1.0 + (form_mult - 1.0) * 0.25
-    
         lam = base * ratio * fame_adj * form_adj
-    
-        # ✅ Mild home advantage
         if home_side:
             lam *= 1.05
-    
-        # Random noise reduced
         lam *= random.uniform(0.97, 1.03)
+        return clamp(lam, 0.3, 1.8)
     
-        # 🔒 Tight cap for realism
-        lam = clamp(lam, 0.3, 1.8)
-        return lam
-    
+        
 
 
     def poisson_draw(lmbda, kmax=6):
@@ -575,8 +599,13 @@ def simulate_fixtures_for_day(conn, day):
         home_form = get_team_form(cur, home_id)
         away_form = get_team_form(cur, away_id)
 
-        home_lambda = expected_goals_local(home_attack, away_defense, home_fm, home_form, True)
-        away_lambda = expected_goals_local(away_attack, home_defense, away_fm, away_form, False)
+
+        # after computing baselines = {comp_id: (atk_mean, def_mean)}
+        atk_mean, def_mean = baselines.get(league_id, (LEAGUE_ATK_MEAN or 1500.0, LEAGUE_DEF_MEAN or 1500.0))
+        
+        home_lambda = expected_goals_local(home_attack, away_defense, home_fm, home_form, True,  atk_mean, def_mean)
+        away_lambda = expected_goals_local(away_attack, home_defense, away_fm, away_form, False, atk_mean, def_mean)
+
 
         home_goals = draw_goals(home_lambda)
         away_goals = draw_goals(away_lambda)
@@ -738,14 +767,27 @@ def simulate_fixtures_for_day(conn, day):
 
         def get_team_players(club_id):
             cur.execute("""
-                SELECT p.id, p.position,
-                       pa.at_defending, pa.at_passing, pa.at_scoring,
-                       pa.at_goalkeeping, pa.at_speed, pa.at_curr_ability
+                SELECT
+                  p.id,
+                  COALESCE(
+                    (SELECT pp.position
+                     FROM players_positions pp
+                     WHERE pp.player_id = p.id
+                     ORDER BY pp.position
+                     LIMIT 1),
+                    p.position,
+                    'CM'
+                  ) AS position,
+                  pa.at_defending, pa.at_passing, pa.at_scoring,
+                  pa.at_goalkeeping, pa.at_speed, pa.at_curr_ability
                 FROM players p
                 JOIN players_attr pa ON pa.player_id = p.id
                 WHERE p.club_id = ? AND p.is_retired = 0
                 ORDER BY pa.at_curr_ability DESC
                 LIMIT 22
+
+
+
             """, (club_id,))
             return cur.fetchall()
 
@@ -771,6 +813,14 @@ def simulate_fixtures_for_day(conn, day):
 
         home_players = get_realistic_squad(cur, home_id)
         away_players = get_realistic_squad(cur, away_id)
+        
+        # Get the club_id for each player
+        home_pids = [pid for pid, *_ in home_players]
+        away_pids = [pid for pid, *_ in away_players]        
+        
+        
+        pid_to_club = {pid: home_id for pid in home_pids}
+        pid_to_club.update({pid: away_id for pid in away_pids})
         
         home_minutes, away_minutes = assign_realistic_minutes(home_players, away_players)
 
@@ -840,7 +890,9 @@ def simulate_fixtures_for_day(conn, day):
             return max(0, int(base * random.uniform(1 - spread, 1 + spread)))
 
         def make_stats(pid, pos, defending, passing, scoring, goalkeeping, speed, ability):
-            minutes_played = all_minutes[pid]
+            minutes_played = all_minutes.get(pid, 0)   # players not in today’s XI get 0
+            if minutes_played == 0:
+                return None  # skip creating a row for DNPs (or keep it if you want 0-min rows)
             if minutes_played == 0:
                 return None
         
@@ -882,7 +934,7 @@ def simulate_fixtures_for_day(conn, day):
                 shoots_t = max(shoots_t, goals)
         
             return (
-                pid, fixture_id, minutes_played,
+                pid, fixture_id, pid_to_club.get(pid), minutes_played,
                 tackles_a, tackles_c,
                 passes_a, passes_c,
                 shoots_a, shoots_t,
@@ -898,12 +950,12 @@ def simulate_fixtures_for_day(conn, day):
 
         cur.executemany("""
             INSERT INTO players_stats (
-                player_id, fixture_id,
+                player_id, fixture_id, club_id,
                 minutes_played, tackles_attempted, tackles_comp,
                 passes_attempted, passes_comp,
                 shoots_attempted, shoots_target,
                 goals_scored, yellow_cards, red_cards
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, player_stats)
 
 
