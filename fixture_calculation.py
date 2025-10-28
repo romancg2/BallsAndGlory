@@ -839,37 +839,83 @@ def simulate_fixtures_for_day(conn, day):
         home_ranges = get_playing_ranges(home_minutes)
         away_ranges = get_playing_ranges(away_minutes)
 
-        # ✅ Handle goal scorers (insert + realistic timing)
+        
+
+        # ✅ Handle goal scorers (insert + realistic timing) — UNIQUE MINUTES
         if scorers:
+            # Determine the match length from actual minutes played
+            def safe_max(d, default=90):
+                return max(d.values()) if d else default
+            match_len = max(safe_max(home_minutes, 90), safe_max(away_minutes, 90))
+            lo_minute, hi_minute = 1, min(94, match_len)
+
+            def pick_unique_minute(start, end, used):
+                """Pick a unique minute within [start,end]; if busy, search nearest free minute.
+                   If none free in the window (very unlikely), search the whole match range."""
+                s = max(lo_minute, int(math.floor(start)))
+                e = min(hi_minute, int(math.ceil(end)))
+
+                if s > e:  # fallback if window is inverted/empty
+                    s, e = lo_minute, hi_minute
+
+                # First try a random minute in the player's valid window
+                candidate = random.randint(s, e)
+                if candidate not in used:
+                    return candidate
+
+                # Then search outward from the candidate within [s,e]
+                left = candidate - 1
+                right = candidate + 1
+                while left >= s or right <= e:
+                    if left >= s and left not in used:
+                        return left
+                    if right <= e and right not in used:
+                        return right
+                    left -= 1
+                    right += 1
+
+                # As a last resort (extremely rare), search whole match range
+                for minute in range(lo_minute, hi_minute + 1):
+                    if minute not in used:
+                        return minute
+
+                # Absolute fallback (should never hit): allow reused minute
+                return candidate
+
             scorer_minutes = []
+            used_minutes = set()
+
+            # Pair (pid, fix_id) with name, but assign mintues ensuring uniqueness
             for (pid, fix_id), name in zip(scorers, names):
-                # Pick a random valid minute within player’s actual time range
                 if pid in home_ranges:
                     start, end = home_ranges[pid]
                 elif pid in away_ranges:
                     start, end = away_ranges[pid]
                 else:
-                    start, end = (1, 90)  # fallback
-            
-                minute = random.randint(max(1, int(start)), min(94, int(end)))
+                    start, end = (lo_minute, hi_minute)
+
+                minute = pick_unique_minute(start, end, used_minutes)
+                used_minutes.add(minute)
                 scorer_minutes.append((pid, fix_id, minute))
 
-            # Sort all by time for consistency
+            # Sort by time for consistency
             scorer_minutes.sort(key=lambda x: x[2])
 
-            # Debug print if enabled
             if LEAGUE_DEBUGGING or CUP_DEBUGGING:
+                def pretty_minute(m):
+                    return f"{m}" if m <= 90 else f"90+{m-90}"
                 pretty = ", ".join([
-                    f"{nm} {m if m < 91 else '90+' + str(m-90)}'"
+                    f"{nm} {pretty_minute(m)}'"
                     for (pid, fix_id, m), nm in zip(scorer_minutes, names)
                 ])
                 print("   Scorers:", pretty)
 
-            # Insert into DB
             cur.executemany("""
                 INSERT INTO match_scorers (player_id, fixture_id, goal_minute)
                 VALUES (?, ?, ?)
             """, scorer_minutes)
+
+
 
 
 
